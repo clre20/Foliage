@@ -31,6 +31,10 @@ python gen_synthetic.py --players 15 --minutes 60 --out synthetic.jsonl
 # 2. 執行模擬（預設 K=20 tick、r_min=32 格、緩衝 32 格、連續 5 次才解耦）
 python simulate.py synthetic.jsonl
 
+# 2b. 分析 FoliageRecorder 錄下來的資料（整個資料夾，或指定檔案）
+python simulate.py 路徑/plugins/FoliageRecorder/recordings/
+python simulate.py 2026-11-20.jsonl.gz 2026-11-21.jsonl.gz
+
 # 3. 掃描參數組合，找出「違反 = 0」中時空數最多、合併拆分最少的一組
 python simulate.py synthetic.jsonl --sweep
 
@@ -58,8 +62,8 @@ Linux / macOS 把 `python` 換成 `python3`。
 | `--sim-dist` 模擬距離（區塊） | 10 | 資料沒寫 `sim_dist` 時使用，請設成伺服器的 `simulation-distance` |
 | `--cores` 核心數 | 24 | 加速上限 |
 
-## 資料格式（錄製插件的輸出）
-JSON Lines，每秒一次，同一個時間點每個有玩家的世界各一行：
+## 資料格式（FoliageRecorder 的輸出）
+可讀 `.jsonl` 與 `.jsonl.gz`，當機留下的不完整 gzip 會讀到能讀的部分為止。JSON Lines，每秒一次，同一個時間點每個有玩家的世界各一行：
 ```json
 {"t":1794935631129,"world":"world_survive","sim_dist":10,
  "players":[{"id":"p1","x":123.4,"z":-55.0,"tp":false}],

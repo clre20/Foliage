@@ -21,6 +21,8 @@ Foliage 時空光錐模擬器
 
 用法：
   python simulate.py data.jsonl
+  python simulate.py recordings/                    # FoliageRecorder 的錄製資料夾（讀全部 .jsonl.gz）
+  python simulate.py recordings/2026-11-2*.jsonl.gz # 指定日期
   python simulate.py data.jsonl --k 20 --rmin 32 --buffer 32 --hold 5
   python simulate.py data.jsonl --sweep            # 掃描參數組合
   python simulate.py data.jsonl --csv out.csv      # 輸出每個時間點的明細
@@ -29,10 +31,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import glob
+import gzip
 import itertools
 import json
 import math
+import os
 import sys
+import zlib
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -56,11 +62,35 @@ class WorldSample:
     cost: dict[tuple[int, int], float]
 
 
-def load(path: str, default_sim: int) -> list[tuple[int, list[WorldSample]]]:
+def _lines(path: str):
+    """逐行讀取 .jsonl 或 .jsonl.gz；當機留下的不完整 gzip 讀到能讀的部分為止。"""
+    opener = gzip.open if path.endswith(".gz") else open
+    try:
+        with opener(path, "rt", encoding="utf-8") as f:
+            for line in f:
+                yield line
+    except (EOFError, gzip.BadGzipFile, zlib.error) as e:
+        print(f"{path} 結尾不完整（可能是當機或正在錄製），只讀到這裡：{e}", file=sys.stderr)
+
+
+def expand(paths: list[str]) -> list[str]:
+    """支援資料夾與萬用字元（Windows 的命令列不會自動展開 *）。"""
+    out = []
+    for p in paths:
+        if os.path.isdir(p):
+            out += sorted(glob.glob(os.path.join(p, "*.jsonl*")))
+        elif any(ch in p for ch in "*?["):
+            out += sorted(glob.glob(p))
+        else:
+            out.append(p)
+    return out
+
+
+def load(paths: list[str], default_sim: int) -> list[tuple[int, list[WorldSample]]]:
     """依時間戳分組，回傳 [(t, [各世界取樣])]，時間由小到大。"""
     by_t: dict[int, list[WorldSample]] = defaultdict(list)
-    with open(path, encoding="utf-8") as f:
-        for n, line in enumerate(f, 1):
+    for path in expand(paths):
+        for n, line in enumerate(_lines(path), 1):
             line = line.strip()
             if not line:
                 continue
@@ -75,7 +105,7 @@ def load(path: str, default_sim: int) -> list[tuple[int, list[WorldSample]]]:
                     cost[key] = cost.get(key, 0.0) + float(c.get("cost", 0.0))
                 by_t[int(d["t"])].append(WorldSample(str(d["world"]), int(d.get("sim_dist", default_sim)), players, vmax, cost))
             except (KeyError, ValueError, TypeError) as e:
-                print(f"第 {n} 行格式錯誤，略過：{e}", file=sys.stderr)
+                print(f"{path} 第 {n} 行格式錯誤，略過：{e}", file=sys.stderr)
     return sorted(by_t.items())
 
 
@@ -271,7 +301,7 @@ def print_report(r, k, rmin, buffer, hold):
 
 def main():
     ap = argparse.ArgumentParser(description="Foliage 時空光錐模擬器")
-    ap.add_argument("data", help="JSON Lines 取樣檔")
+    ap.add_argument("data", nargs="+", help="取樣檔（.jsonl 或 .jsonl.gz）、資料夾或萬用字元，可多個")
     ap.add_argument("--k", type=int, default=20, help="重新判斷間隔（tick），預設 20")
     ap.add_argument("--rmin", type=float, default=32, help="固定互動距離下限（格），預設 32")
     ap.add_argument("--buffer", type=float, default=32, help="解耦遲滯緩衝（格），預設 32")
