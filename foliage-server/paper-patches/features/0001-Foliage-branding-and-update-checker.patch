@@ -1,0 +1,362 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clre20 <noreply@github.com>
+Date: Wed, 18 Nov 2026 01:51:32 +0800
+Subject: [PATCH] Foliage branding and update checker
+
+
+diff --git a/src/main/java/com/destroystokyo/paper/PaperVersionFetcher.java b/src/main/java/com/destroystokyo/paper/PaperVersionFetcher.java
+index ba32d58c33c65b1384baa7616da64f7a4a1f0d1d..29c280b1d65707e69816cc87c99cb73ef771e43a 100644
+--- a/src/main/java/com/destroystokyo/paper/PaperVersionFetcher.java
++++ b/src/main/java/com/destroystokyo/paper/PaperVersionFetcher.java
+@@ -13,240 +13,143 @@ import java.io.IOException;
+ import java.io.InputStreamReader;
+ import java.net.HttpURLConnection;
+ import java.net.URI;
+-import java.net.URL;
+ import java.nio.charset.StandardCharsets;
+-import java.util.Optional;
+ import java.util.OptionalInt;
+-import java.util.stream.StreamSupport;
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
+ import net.kyori.adventure.text.Component;
+-import net.kyori.adventure.text.logger.slf4j.ComponentLogger;
+ import net.kyori.adventure.text.event.ClickEvent;
+ import net.kyori.adventure.text.format.NamedTextColor;
+ import net.kyori.adventure.text.format.TextDecoration;
++import net.kyori.adventure.text.logger.slf4j.ComponentLogger;
++import org.apache.logging.log4j.LogManager;
+ import org.checkerframework.checker.nullness.qual.NonNull;
+ import org.checkerframework.checker.nullness.qual.Nullable;
+ import org.checkerframework.framework.qual.DefaultQualifier;
+-import org.apache.logging.log4j.LogManager;
+ import org.slf4j.Logger;
+-import java.util.List;
+ 
+-import static net.kyori.adventure.text.Component.text;
+-import static net.kyori.adventure.text.format.TextColor.color;
+ import static io.papermc.paper.ServerBuildInfo.StringRepresentation.VERSION_SIMPLE;
++import static net.kyori.adventure.text.Component.text;
+ 
++// Foliage start - check updates against clre20/Foliage GitHub Releases instead of PaperMC's API
+ @DefaultQualifier(NonNull.class)
+ public class PaperVersionFetcher implements VersionFetcher {
+     private static final Logger LOGGER = LogUtils.getClassLogger();
+     private static final ComponentLogger COMPONENT_LOGGER = ComponentLogger.logger(LogManager.getRootLogger().getName());
+-    private static final int DISTANCE_ERROR = -1;
+-    private static final int DISTANCE_UNKNOWN = -2;
+-    private static final String DOWNLOAD_PAGE = "https://papermc.io/downloads/paper";
+-    private static final String REPOSITORY = "PaperMC/Paper";
++    private static final String REPOSITORY = "clre20/Foliage";
++    private static final String DOWNLOAD_PAGE = "https://github.com/" + REPOSITORY + "/releases/latest";
++    private static final String RELEASES_API = "https://api.github.com/repos/" + REPOSITORY + "/releases?per_page=50";
+     private static final ServerBuildInfo BUILD_INFO = ServerBuildInfo.buildInfo();
+-    private static final String USER_AGENT = BUILD_INFO.brandName() + "/" + BUILD_INFO.asString(VERSION_SIMPLE) + " (https://papermc.io)";
++    private static final String USER_AGENT = BUILD_INFO.brandName() + "/" + BUILD_INFO.asString(VERSION_SIMPLE);
+     private static final Gson GSON = new Gson();
++    private static final String MC_VERSION = BUILD_INFO.minecraftVersionId();
++    // Release tags look like v26.3-12 (v + Minecraft version + "-" + build number)
++    private static final Pattern TAG_PATTERN = Pattern.compile("^[vV]?" + Pattern.quote(MC_VERSION) + "-(\\d+)$");
++    private static final OptionalInt CURRENT_BUILD = BUILD_INFO.buildNumber();
++    private static final String CURRENT_VERSION = MC_VERSION + "-" + (CURRENT_BUILD.isPresent() ? CURRENT_BUILD.getAsInt() : "DEV");
++
++    private enum Status { LATEST, OUTDATED, NEWER, UNKNOWN, ERROR }
++
++    private record Result(Status status, @Nullable String latest) {}
+ 
+     @Override
+     public long getCacheTime() {
+-        return 720000;
++        return 600000; // 10 minutes; GitHub allows 60 unauthenticated requests per hour
+     }
+ 
+     @Override
+     public Component getVersionMessage() {
+-        final Component updateMessage;
+-        if (BUILD_INFO.buildNumber().isEmpty() && BUILD_INFO.gitCommit().isEmpty()) {
+-            updateMessage = text("You are running a development version without access to version information", color(0xFF5300));
+-        } else {
+-            updateMessage = getUpdateStatusMessage();
+-        }
++        final Component updateMessage = toComponent(check());
+         final @Nullable Component history = this.getHistory();
+-
+         return history != null ? Component.textOfChildren(updateMessage, Component.newline(), history) : updateMessage;
+     }
+ 
+     public static void getUpdateStatusStartupMessage() {
+-        int distance = DISTANCE_ERROR;
+-
+-        final OptionalInt buildNumber = BUILD_INFO.buildNumber();
+-        if (buildNumber.isEmpty() && BUILD_INFO.gitCommit().isEmpty()) {
+-            COMPONENT_LOGGER.warn(text("*** You are running a development version without access to version information ***"));
+-        } else {
+-            final Optional<MinecraftVersionFetcher> apiResult = fetchMinecraftVersionList();
+-            if (buildNumber.isPresent()) {
+-                distance = fetchDistanceFromSiteApi(buildNumber.getAsInt());
+-            } else {
+-                final Optional<String> gitBranch = BUILD_INFO.gitBranch();
+-                final Optional<String> gitCommit = BUILD_INFO.gitCommit();
+-                if (gitBranch.isPresent() && gitCommit.isPresent()) {
+-                    distance = fetchDistanceFromGitHub(gitBranch.get(), gitCommit.get());
+-                }
+-            }
+-
+-            switch (distance) {
+-                case DISTANCE_ERROR -> COMPONENT_LOGGER.error(text("*** Error obtaining version information! Cannot fetch version info ***"));
+-                case 0 -> apiResult.ifPresent(result -> {
+-                    COMPONENT_LOGGER.warn(text("*************************************************************************************"));
+-                    COMPONENT_LOGGER.warn(text("You are running the latest build for your Minecraft version (" + BUILD_INFO.minecraftVersionId() + ")"));
+-                    COMPONENT_LOGGER.warn(text("However, you are " + result.distance() + " release" + (result.distance() == 1 ? "" : "s") + " behind the latest stable release (" + result.latestVersion() + ")!"));
+-                    COMPONENT_LOGGER.warn(text("It is recommended that you update as soon as possible"));
+-                    COMPONENT_LOGGER.warn(text(DOWNLOAD_PAGE));
+-                    COMPONENT_LOGGER.warn(text("*************************************************************************************"));
+-                });
+-                case DISTANCE_UNKNOWN -> COMPONENT_LOGGER.warn(text("*** You are running an unknown version! Cannot fetch version info ***"));
+-                default -> {
+-                    if (apiResult.isPresent()) {
+-                        final MinecraftVersionFetcher result = apiResult.get();
+-                        COMPONENT_LOGGER.warn(text("*** You are running an outdated version of Minecraft, which is " + result.distance() + " release" + (result.distance() == 1 ? "" : "s") + " and " + distance + " build" + (distance == 1 ? "" : "s") + " behind!"));
+-                        COMPONENT_LOGGER.warn(text("*** Please update to the latest stable version on " + DOWNLOAD_PAGE + " ***"));
+-                    } else {
+-                        COMPONENT_LOGGER.info(text("*** Currently you are " + distance + " build" + (distance == 1 ? "" : "s") + " behind ***"));
+-                        COMPONENT_LOGGER.info(text("*** It is highly recommended to download the latest build from " + DOWNLOAD_PAGE + " ***"));
+-                    }
+-                }
++        final Result result = check();
++        switch (result.status()) {
++            case LATEST -> COMPONENT_LOGGER.info(text("*** You are running the latest Foliage version (" + CURRENT_VERSION + ") ***"));
++            case NEWER -> COMPONENT_LOGGER.info(text("*** Foliage " + CURRENT_VERSION + " is newer than the latest GitHub release " + result.latest() + " (development build) ***"));
++            case OUTDATED -> {
++                COMPONENT_LOGGER.warn(text("*************************************************************************************"));
++                COMPONENT_LOGGER.warn(text("A new Foliage version is available: " + result.latest() + " (current: " + CURRENT_VERSION + ")"));
++                COMPONENT_LOGGER.warn(text("Download: " + DOWNLOAD_PAGE));
++                COMPONENT_LOGGER.warn(text("*************************************************************************************"));
+             }
++            case UNKNOWN -> COMPONENT_LOGGER.warn(text("*** Unknown Foliage version (development build or no GitHub release for this Minecraft version yet) ***"));
++            case ERROR -> COMPONENT_LOGGER.error(text("*** Error obtaining Foliage version information ***"));
+         }
+     }
+ 
+-    private static Component getUpdateStatusMessage() {
+-        int distance = DISTANCE_ERROR;
+-
+-        final OptionalInt buildNumber = PaperVersionFetcher.BUILD_INFO.buildNumber();
+-        if (buildNumber.isPresent()) {
+-            distance = fetchDistanceFromSiteApi(buildNumber.getAsInt());
+-        } else {
+-            final Optional<String> gitBranch = PaperVersionFetcher.BUILD_INFO.gitBranch();
+-            final Optional<String> gitCommit = PaperVersionFetcher.BUILD_INFO.gitCommit();
+-            if (gitBranch.isPresent() && gitCommit.isPresent()) {
+-                distance = fetchDistanceFromGitHub(gitBranch.get(), gitCommit.get());
+-            }
+-        }
+-
+-        return switch (distance) {
+-            case DISTANCE_ERROR -> text("Error obtaining version information", NamedTextColor.YELLOW);
+-            case 0 -> text("You are running the latest version", NamedTextColor.GREEN);
+-            case DISTANCE_UNKNOWN -> text("Unknown version", NamedTextColor.YELLOW);
+-            default -> text("You are " + distance + " version(s) behind", NamedTextColor.YELLOW)
++    private static Component toComponent(final Result result) {
++        return switch (result.status()) {
++            case LATEST -> text("You are running the latest version (" + CURRENT_VERSION + ")", NamedTextColor.GREEN);
++            case NEWER -> text("Current version " + CURRENT_VERSION + " is newer than the latest GitHub release " + result.latest() + " (development build)", NamedTextColor.AQUA);
++            case UNKNOWN -> text("Unknown version (development build or no GitHub release for this Minecraft version yet)", NamedTextColor.YELLOW);
++            case ERROR -> text("Error obtaining version information", NamedTextColor.YELLOW);
++            case OUTDATED -> text("A new version is available: " + result.latest() + " (current: " + CURRENT_VERSION + ")", NamedTextColor.YELLOW)
+                 .append(Component.newline())
+-                .append(text("Download the new version at: ")
++                .append(text("Download: ")
+                     .append(text(DOWNLOAD_PAGE, NamedTextColor.GOLD)
+                         .hoverEvent(text("Click to open", NamedTextColor.WHITE))
+                         .clickEvent(ClickEvent.openUrl(DOWNLOAD_PAGE))));
+         };
+     }
+ 
+-    private record MinecraftVersionFetcher(String latestVersion, int distance) {}
+-
+-    private static Optional<MinecraftVersionFetcher> fetchMinecraftVersionList() {
+-        final String currentVersion = PaperVersionFetcher.BUILD_INFO.minecraftVersionId();
+-
++    private static Result check() {
++        if (CURRENT_BUILD.isEmpty()) {
++            return new Result(Status.UNKNOWN, null); // local development build
++        }
+         try {
+-            final URL versionsUrl = URI.create("https://fill.papermc.io/v3/projects/paper").toURL();
+-            final HttpURLConnection connection = (HttpURLConnection) versionsUrl.openConnection();
++            final HttpURLConnection connection = (HttpURLConnection) URI.create(RELEASES_API).toURL().openConnection();
+             connection.setConnectTimeout(5000);
+             connection.setReadTimeout(5000);
+-            connection.setRequestProperty("User-Agent", PaperVersionFetcher.USER_AGENT);
+-            connection.setRequestProperty("Accept", "application/json");
+-
++            connection.setRequestProperty("User-Agent", USER_AGENT);
++            connection.setRequestProperty("Accept", "application/vnd.github+json");
++            connection.connect();
++            if (connection.getResponseCode() != HttpURLConnection.HTTP_OK) {
++                return new Result(Status.ERROR, null);
++            }
++            int latestBuild = -1;
+             try (final BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
+-                final JsonObject json = GSON.fromJson(reader, JsonObject.class);
+-                final JsonObject versions = json.getAsJsonObject("versions");
+-                final List<String> versionList = versions.keySet().stream()
+-                    .map(versions::getAsJsonArray)
+-                    .flatMap(array -> StreamSupport.stream(array.spliterator(), false))
+-                    .map(JsonElement::getAsString)
+-                    .toList();
+-
+-                for (final String latestVersion : versionList) {
+-                    if (latestVersion.equals(currentVersion)) {
+-                        return Optional.empty();
++                final JsonArray releases = GSON.fromJson(reader, JsonArray.class);
++                if (releases == null) {
++                    return new Result(Status.ERROR, null);
++                }
++                for (final JsonElement element : releases) {
++                    if (!element.isJsonObject()) {
++                        continue;
+                     }
+-
+-                    try {
+-                        final URL buildsUrl = URI.create("https://fill.papermc.io/v3/projects/paper/versions/" + latestVersion + "/builds/latest").toURL();
+-                        final HttpURLConnection connection2 = (HttpURLConnection) buildsUrl.openConnection();
+-                        connection2.setConnectTimeout(5000);
+-                        connection2.setReadTimeout(5000);
+-                        connection2.setRequestProperty("User-Agent", PaperVersionFetcher.USER_AGENT);
+-                        connection2.setRequestProperty("Accept", "application/json");
+-
+-                        try (final BufferedReader buildReader = new BufferedReader(new InputStreamReader(connection2.getInputStream(), StandardCharsets.UTF_8))) {
+-                            final JsonObject buildJson = GSON.fromJson(buildReader, JsonObject.class);
+-                            if ("STABLE".equals(buildJson.get("channel").getAsString())) {
+-                                final int currentIndex = versionList.indexOf(currentVersion);
+-                                final int latestIndex = versionList.indexOf(latestVersion);
+-                                final int distance = currentIndex - latestIndex;
+-                                if (distance < 0) {
+-                                    // Avoid logging warnings for early unpublished snapshot builds
+-                                    return Optional.empty();
+-                                }
+-
+-                                return Optional.of(new MinecraftVersionFetcher(latestVersion, distance));
+-                            }
+-                        } catch (final JsonSyntaxException ex) {
+-                            LOGGER.error("Error parsing json from Paper's downloads API", ex);
+-                        }
+-                    } catch (final IOException e) {
+-                        LOGGER.error("Error while parsing latest build", e);
++                    final JsonObject release = element.getAsJsonObject();
++                    if (isTrue(release, "draft") || isTrue(release, "prerelease") || !release.has("tag_name")) {
++                        continue;
++                    }
++                    final Matcher matcher = TAG_PATTERN.matcher(release.get("tag_name").getAsString().trim());
++                    if (matcher.matches()) {
++                        latestBuild = Math.max(latestBuild, parse(matcher.group(1)));
+                     }
+                 }
+-            } catch (final JsonSyntaxException ex) {
+-                LOGGER.error("Error parsing json from Paper's downloads API", ex);
+             }
+-        } catch (final IOException e) {
+-            LOGGER.error("Error while parsing version list", e);
++            if (latestBuild < 0) {
++                return new Result(Status.UNKNOWN, null); // no release for this Minecraft version yet
++            }
++            final String latest = MC_VERSION + "-" + latestBuild;
++            final int cmp = Integer.compare(CURRENT_BUILD.getAsInt(), latestBuild);
++            return new Result(cmp == 0 ? Status.LATEST : (cmp < 0 ? Status.OUTDATED : Status.NEWER), latest);
++        } catch (final IOException | JsonSyntaxException | IllegalStateException | UnsupportedOperationException e) {
++            LOGGER.error("Error while checking Foliage version", e);
++            return new Result(Status.ERROR, null);
+         }
+-        return Optional.empty();
+     }
+ 
+-    private static int fetchDistanceFromSiteApi(final int jenkinsBuild) {
+-        try {
+-            final URL buildsUrl = URI.create("https://fill.papermc.io/v3/projects/paper/versions/" + PaperVersionFetcher.BUILD_INFO.minecraftVersionId() + "/builds").toURL();
+-            final HttpURLConnection connection = (HttpURLConnection) buildsUrl.openConnection();
+-            connection.setConnectTimeout(5000);
+-            connection.setReadTimeout(5000);
+-            connection.setRequestProperty("User-Agent", PaperVersionFetcher.USER_AGENT);
+-            connection.setRequestProperty("Accept", "application/json");
+-            try (final BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
+-                final JsonArray builds = GSON.fromJson(reader, JsonArray.class);
+-                final int latest = StreamSupport.stream(builds.spliterator(), false)
+-                    .mapToInt(build -> build.getAsJsonObject().get("id").getAsInt())
+-                    .max()
+-                    .orElseThrow();
+-                return Math.max(latest - jenkinsBuild, 0);
+-            } catch (final JsonSyntaxException ex) {
+-                LOGGER.error("Error parsing json from Paper's downloads API", ex);
+-                return DISTANCE_ERROR;
+-            }
+-        } catch (final IOException e) {
+-            LOGGER.error("Error while parsing version", e);
+-            return DISTANCE_ERROR;
+-        }
++    private static boolean isTrue(final JsonObject obj, final String key) {
++        return obj.has(key) && obj.get(key).isJsonPrimitive() && obj.get(key).getAsBoolean();
+     }
+ 
+-    // Contributed by Techcable <Techcable@outlook.com> in GH-65
+-    private static int fetchDistanceFromGitHub(final String branch, final String hash) {
++    private static int parse(final String s) {
+         try {
+-            final HttpURLConnection connection = (HttpURLConnection) URI.create("https://api.github.com/repos/%s/compare/%s...%s".formatted(PaperVersionFetcher.REPOSITORY, branch, hash)).toURL().openConnection();
+-            connection.setConnectTimeout(5000);
+-            connection.setReadTimeout(5000);
+-            connection.setRequestProperty("User-Agent", PaperVersionFetcher.USER_AGENT);
+-            connection.connect();
+-            if (connection.getResponseCode() == HttpURLConnection.HTTP_NOT_FOUND) return DISTANCE_UNKNOWN; // Unknown commit
+-            try (final BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
+-                final JsonObject obj = GSON.fromJson(reader, JsonObject.class);
+-                final String status = obj.get("status").getAsString();
+-                return switch (status) {
+-                    case "identical" -> 0;
+-                    case "behind" -> obj.get("behind_by").getAsInt();
+-                    default -> DISTANCE_ERROR;
+-                };
+-            } catch (final JsonSyntaxException | NumberFormatException e) {
+-                LOGGER.error("Error parsing json from GitHub's API", e);
+-                return DISTANCE_ERROR;
+-            }
+-        } catch (final IOException e) {
+-            LOGGER.error("Error while parsing version", e);
+-            return DISTANCE_ERROR;
++            return Integer.parseInt(s);
++        } catch (final NumberFormatException e) {
++            return 0;
+         }
+     }
+ 
+@@ -264,3 +167,4 @@ public class PaperVersionFetcher implements VersionFetcher {
+         return text("Previous version: " + oldVersion, NamedTextColor.GRAY, TextDecoration.ITALIC);
+     }
+ }
++// Foliage end
+diff --git a/src/main/java/io/papermc/paper/ServerBuildInfoImpl.java b/src/main/java/io/papermc/paper/ServerBuildInfoImpl.java
+index 74ffdc823e66fc5ec027c4b7c462382bcbfe2be2..a28dd468e396cef355d9dbbdfb8633056540bc52 100644
+--- a/src/main/java/io/papermc/paper/ServerBuildInfoImpl.java
++++ b/src/main/java/io/papermc/paper/ServerBuildInfoImpl.java
+@@ -42,9 +42,9 @@ public record ServerBuildInfoImpl(
+         this(
+             getManifestAttribute(manifest, ATTRIBUTE_BRAND_ID)
+                 .map(Key::key)
+-                .orElse(BRAND_PAPER_ID),
++                .orElse(Key.key("clre20", "foliage")), // Foliage
+             getManifestAttribute(manifest, ATTRIBUTE_BRAND_NAME)
+-                .orElse(BRAND_PAPER_NAME),
++                .orElse("Foliage"), // Foliage
+             SharedConstants.getCurrentVersion().id(),
+             SharedConstants.getCurrentVersion().name(),
+             getManifestAttribute(manifest, ATTRIBUTE_BUILD_NUMBER)
+@@ -61,7 +61,7 @@ public record ServerBuildInfoImpl(
+ 
+     @Override
+     public boolean isBrandCompatible(final @NotNull Key brandId) {
+-        return brandId.equals(this.brandId);
++        return brandId.equals(this.brandId) || brandId.equals(BRAND_PAPER_ID); // Foliage - stay compatible with plugins checking for Paper
+     }
+ 
+     @Override
