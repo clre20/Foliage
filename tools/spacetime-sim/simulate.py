@@ -86,7 +86,7 @@ def expand(paths: list[str]) -> list[str]:
     return out
 
 
-def _parse(d: dict, default_sim: int) -> WorldSample:
+def _parse(d: dict, default_sim: int, force_sim: int | None = None) -> WorldSample:
     players = [Player(str(p["id"]), math.floor(float(p["x"])) >> 4, math.floor(float(p["z"])) >> 4, bool(p.get("tp", False)))
                for p in d.get("players", [])]
     vmax, cost = {}, {}
@@ -94,10 +94,11 @@ def _parse(d: dict, default_sim: int) -> WorldSample:
         key = (int(c["x"]), int(c["z"]))
         vmax[key] = max(vmax.get(key, 0.0), float(c.get("vmax", 0.0)))
         cost[key] = cost.get(key, 0.0) + float(c.get("cost", 0.0))
-    return WorldSample(str(d["world"]), int(d.get("sim_dist", default_sim)), players, vmax, cost)
+    sd = force_sim if force_sim is not None else int(d.get("sim_dist", default_sim))
+    return WorldSample(str(d["world"]), sd, players, vmax, cost)
 
 
-def iter_samples(paths: list[str], default_sim: int):
+def iter_samples(paths: list[str], default_sim: int, force_sim: int | None = None):
     """逐筆讀取，同一個時間戳的各世界合成一組 (t, [WorldSample])；不會把整個檔案讀進記憶體。
     錄製檔本來就依時間順序寫入；檔案依檔名（日期）排序。"""
     cur_t, cur = None, []
@@ -109,7 +110,7 @@ def iter_samples(paths: list[str], default_sim: int):
             try:
                 d = json.loads(line)
                 t = int(d["t"])
-                ws = _parse(d, default_sim)
+                ws = _parse(d, default_sim, force_sim)
             except (KeyError, ValueError, TypeError) as e:
                 print(f"{path} 第 {n} 行格式錯誤，略過：{e}", file=sys.stderr)
                 continue
@@ -162,10 +163,15 @@ def gap_blocks(a: Player, b: Player, sd: int) -> float:
 
 
 def group_cost(members: list[Player], ws: WorldSample) -> float:
-    seen = set()
-    for p in members:
-        seen.update(zone_chunks(p, ws.sim_dist))
-    return sum(ws.cost.get(c, 0.0) for c in seen)
+    """成員模擬範圍聯集內的負載；只走訪有資料的區塊，速度與模擬距離無關。"""
+    sd = ws.sim_dist
+    total = 0.0
+    for (cx, cz), c in ws.cost.items():
+        for p in members:
+            if abs(cx - p.cx) <= sd and abs(cz - p.cz) <= sd:
+                total += c
+                break
+    return total
 
 
 # ---------------------------------------------------------------- 三種切分方式
@@ -195,9 +201,8 @@ def cone_radius(p: Player, ws: WorldSample, k: int, rmin: float) -> float:
     """玩家範圍內最快物體在 k tick 內能移動的距離，最少 rmin 格，最多到模擬範圍邊界（讀取邊界當障壁）。"""
     sd = ws.sim_dist
     v = 0.0
-    for c in zone_chunks(p, sd):
-        vv = ws.vmax.get(c)
-        if vv is not None and vv > v:
+    for (cx, cz), vv in ws.vmax.items():
+        if vv > v and abs(cx - p.cx) <= sd and abs(cz - p.cz) <= sd:
             v = vv
     return min(max(rmin, v * k), (sd + 1) * 16 * 2)
 
@@ -326,6 +331,7 @@ def main():
     ap.add_argument("--buffer", type=float, default=32, help="解耦遲滯緩衝（格），預設 32")
     ap.add_argument("--hold", type=int, default=5, help="解耦需連續達成的取樣次數，預設 5")
     ap.add_argument("--sim-dist", type=int, default=10, help="資料沒寫 sim_dist 時用的模擬距離，預設 10")
+    ap.add_argument("--force-sim-dist", type=int, help="忽略資料裡的 sim_dist，全部改用這個模擬距離（評估加大模擬距離的效果）")
     ap.add_argument("--cores", type=int, default=24, help="可用核心數（加速上限），預設 24")
     ap.add_argument("--sweep", action="store_true", help="掃描 K / r_min / 緩衝的組合")
     ap.add_argument("--csv", help="輸出每個時間點明細的 CSV 路徑")
@@ -333,7 +339,9 @@ def main():
 
     if not expand(a.data):
         sys.exit("找不到取樣檔")
-    samples = lambda: iter_samples(a.data, a.sim_dist)
+    if a.force_sim_dist is not None and not 1 <= a.force_sim_dist <= 32:
+        sys.exit("--force-sim-dist 必須在 1 到 32 之間")
+    samples = lambda: iter_samples(a.data, a.sim_dist, a.force_sim_dist)
 
     if a.sweep:
         print(f"{'K':>4}{'r_min':>7}{'緩衝':>6}{'光錐時空數':>10}{'加速':>8}{'合併拆分/分':>12}{'違反':>6}")

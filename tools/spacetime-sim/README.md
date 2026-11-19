@@ -60,6 +60,7 @@ Linux / macOS 把 `python` 換成 `python3`。
 | `--buffer` 解耦遲滯緩衝（格） | 32 | 合併拆分變少 | 拆得快，容易來回抖動 |
 | `--hold` 解耦需連續次數 | 5 | 同上 | 同上 |
 | `--sim-dist` 模擬距離（區塊） | 10 | 資料沒寫 `sim_dist` 時使用，請設成伺服器的 `simulation-distance` |
+| `--force-sim-dist` | 無 | 忽略資料裡的模擬距離，全部改用這個值，評估加大模擬距離的效果（1～32）。錄製時範圍外的區塊沒有實體資料，負載與速度會低估 |
 | `--cores` 核心數 | 24 | 加速上限 |
 
 ## 資料格式（FoliageRecorder 的輸出）
