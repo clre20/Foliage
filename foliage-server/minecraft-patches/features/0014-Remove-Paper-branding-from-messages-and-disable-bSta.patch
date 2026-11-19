@@ -45,10 +45,10 @@ index a6d9b95c42926754acd2e54e7af7ade3f7d2c322..ef598538c7cf13ec3f85d3a237be3efa
          /*
          LOGGER.info("Forcing world upgrade! {}", storageSource.getLevelId()); // CraftBukkit
 diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
-index a8c330e21a715711ed21dd9084deea5254121b44..fb5a72ce96eab6a565fc7083f123385c682b94b1 100644
+index f1b703eb2dfdbd0a192a2e68ff479f9799e7f075..7da46e64c4e68e78c4eb54149a0ac048c59f36df 100644
 --- a/net/minecraft/server/MinecraftServer.java
 +++ b/net/minecraft/server/MinecraftServer.java
-@@ -1275,8 +1275,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+@@ -1365,8 +1365,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
              if (io.papermc.paper.configuration.GlobalConfiguration.isFirstStart) {
                  LOGGER.info("*************************************************************************************");
                  LOGGER.info("This is the first time you're starting this server.");
@@ -59,7 +59,7 @@ index a8c330e21a715711ed21dd9084deea5254121b44..fb5a72ce96eab6a565fc7083f123385c
              }
              // Paper end - Add onboarding message for initial server start
 diff --git a/net/minecraft/server/dedicated/DedicatedServer.java b/net/minecraft/server/dedicated/DedicatedServer.java
-index 68675926ee85f738b3693a76fc29b80b80c717ed..ec8339a76ee8ad8294132054cfb9f34f5044e917 100644
+index 762822ce2ccf98952dc92be4824c48fe6bc1bacb..e8eb747855ceb3dcfd2a29a5c784fb474f166cf4 100644
 --- a/net/minecraft/server/dedicated/DedicatedServer.java
 +++ b/net/minecraft/server/dedicated/DedicatedServer.java
 @@ -249,7 +249,7 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
@@ -85,7 +85,7 @@ index 023cca49c6dd0f2961cf30f02c7cd74601f73f8b..eecf7380c098d4696390e23af71c3d83
  
          javax.swing.JLabel jLabel = new javax.swing.JLabel("If you need help setting up your server you can visit:");
 diff --git a/net/minecraft/server/network/ServerConnectionListener.java b/net/minecraft/server/network/ServerConnectionListener.java
-index 42408dede2808447281b49f4006c1d8b03c10bf4..525603c4783f94aadf864a990cfd27df318c6e0e 100644
+index 4fb5d1e8cf244226b37b70fa004ad0cdaa7dd56b..f3c5e4d89f999389c4bba5d7197744a8309218a1 100644
 --- a/net/minecraft/server/network/ServerConnectionListener.java
 +++ b/net/minecraft/server/network/ServerConnectionListener.java
 @@ -72,8 +72,8 @@ public class ServerConnectionListener {

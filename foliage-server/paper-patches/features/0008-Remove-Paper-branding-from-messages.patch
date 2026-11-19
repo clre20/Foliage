@@ -40,12 +40,12 @@ index b9f788693b0c4be48e8a923a3dec50555d135e7e..2c1e16928f3c5945148595bdaa7cbf29
  
      public static final long IO_QUEUE_HOLD_TIME = (long)(25.0e6); // 25ms
 diff --git a/src/main/java/io/papermc/paper/SparksFly.java b/src/main/java/io/papermc/paper/SparksFly.java
-index 62e2d5704c348955bc8284dc2d54c933b7bcdd06..81b559791f45115682f8df44b7ff21ca4570d151 100644
+index b332645ed65928100f580221d8a9948bc77e362e..8f04f8b4ef704fc5f3acc5eafbd6976f137a3791 100644
 --- a/src/main/java/io/papermc/paper/SparksFly.java
 +++ b/src/main/java/io/papermc/paper/SparksFly.java
 @@ -41,7 +41,7 @@ public final class SparksFly {
      public SparksFly(final Server server) {
-         this.mainThreadTaskQueue = new ConcurrentLinkedQueue<>();
+         // Folia - region threading
          this.logger = Logger.getLogger(ID);
 -        this.logger.log(Level.INFO, "This server bundles the spark profiler. For more information please visit https://docs.papermc.io/paper/profiling");
 +        this.logger.log(Level.INFO, "This server bundles the spark profiler.");
@@ -89,10 +89,10 @@ index 9c49bb7fb8c3ca4b62e73dcfca2669971defb181..8e232867135c69fd553a0ec807253606
      private static final Type JAVA_PLUGIN_PROVIDER_TYPE = new TypeToken<PluginProvider<JavaPlugin>>() {}.getType();
  
 diff --git a/src/main/java/io/papermc/paper/command/subcommands/ReloadCommand.java b/src/main/java/io/papermc/paper/command/subcommands/ReloadCommand.java
-index bd68139ae635f2ad7ec8e7a21e0056a139c4c62e..d82293c6e6a09dc3751e86ae26b8606711fb832d 100644
+index 48a43341b17247355a531164019d5cc9c5555f26..f56591d7d3e5b75e488ab8dfa33b0e8b741eb78c 100644
 --- a/src/main/java/io/papermc/paper/command/subcommands/ReloadCommand.java
 +++ b/src/main/java/io/papermc/paper/command/subcommands/ReloadCommand.java
-@@ -28,6 +28,6 @@ public final class ReloadCommand implements PaperSubcommand {
+@@ -30,6 +30,6 @@ public final class ReloadCommand implements PaperSubcommand {
          server.paperConfigurations.reloadConfigs(server);
          server.server.reloadCount++;
  
@@ -264,7 +264,7 @@ index eb0ac87536692ea1215bdbb4646cfa6589e6fb10..b9f47b6f2ba058381012444da0de53f9
                  }
  
 diff --git a/src/main/java/org/spigotmc/SpigotConfig.java b/src/main/java/org/spigotmc/SpigotConfig.java
-index 025ec3f3e84a3367b4d709c8c3ecd98f6dfecab4..8c984f9c6b5ef981396229e4a4774466a44373b9 100644
+index 78fd32976b9394d5a6ddeb0444eae3f5703ab940..8bc392bad6f0f4003c698f3d6fd3d093f6a03cd8 100644
 --- a/src/main/java/org/spigotmc/SpigotConfig.java
 +++ b/src/main/java/org/spigotmc/SpigotConfig.java
 @@ -33,17 +33,11 @@ public class SpigotConfig {
@@ -288,7 +288,7 @@ index 025ec3f3e84a3367b4d709c8c3ecd98f6dfecab4..8c984f9c6b5ef981396229e4a4774466
      /*========================================================================*/
      public static YamlConfiguration config;
 diff --git a/src/main/java/org/spigotmc/WatchdogThread.java b/src/main/java/org/spigotmc/WatchdogThread.java
-index ab6c553f0f5c228e65c95538fc2deef07d9cd077..36a0e0923be0856d2ea9aca13d1579b170741e38 100644
+index 5607f4cc8ca2f620461eb5e97d01d9db0d6b2303..8341aec3f3ae9f9253437aa9a6eb6ac359ec85bd 100644
 --- a/src/main/java/org/spigotmc/WatchdogThread.java
 +++ b/src/main/java/org/spigotmc/WatchdogThread.java
 @@ -75,14 +75,14 @@ public class WatchdogThread extends ca.spottedleaf.moonrise.common.util.TickThre
