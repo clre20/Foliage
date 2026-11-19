@@ -86,27 +86,42 @@ def expand(paths: list[str]) -> list[str]:
     return out
 
 
-def load(paths: list[str], default_sim: int) -> list[tuple[int, list[WorldSample]]]:
-    """依時間戳分組，回傳 [(t, [各世界取樣])]，時間由小到大。"""
-    by_t: dict[int, list[WorldSample]] = defaultdict(list)
-    for path in expand(paths):
+def _parse(d: dict, default_sim: int) -> WorldSample:
+    players = [Player(str(p["id"]), math.floor(float(p["x"])) >> 4, math.floor(float(p["z"])) >> 4, bool(p.get("tp", False)))
+               for p in d.get("players", [])]
+    vmax, cost = {}, {}
+    for c in d.get("chunks", []):
+        key = (int(c["x"]), int(c["z"]))
+        vmax[key] = max(vmax.get(key, 0.0), float(c.get("vmax", 0.0)))
+        cost[key] = cost.get(key, 0.0) + float(c.get("cost", 0.0))
+    return WorldSample(str(d["world"]), int(d.get("sim_dist", default_sim)), players, vmax, cost)
+
+
+def iter_samples(paths: list[str], default_sim: int):
+    """逐筆讀取，同一個時間戳的各世界合成一組 (t, [WorldSample])；不會把整個檔案讀進記憶體。
+    錄製檔本來就依時間順序寫入；檔案依檔名（日期）排序。"""
+    cur_t, cur = None, []
+    for path in sorted(expand(paths)):
         for n, line in enumerate(_lines(path), 1):
             line = line.strip()
             if not line:
                 continue
             try:
                 d = json.loads(line)
-                players = [Player(str(p["id"]), math.floor(float(p["x"])) >> 4, math.floor(float(p["z"])) >> 4, bool(p.get("tp", False)))
-                           for p in d.get("players", [])]
-                vmax, cost = {}, {}
-                for c in d.get("chunks", []):
-                    key = (int(c["x"]), int(c["z"]))
-                    vmax[key] = max(vmax.get(key, 0.0), float(c.get("vmax", 0.0)))
-                    cost[key] = cost.get(key, 0.0) + float(c.get("cost", 0.0))
-                by_t[int(d["t"])].append(WorldSample(str(d["world"]), int(d.get("sim_dist", default_sim)), players, vmax, cost))
+                t = int(d["t"])
+                ws = _parse(d, default_sim)
             except (KeyError, ValueError, TypeError) as e:
                 print(f"{path} 第 {n} 行格式錯誤，略過：{e}", file=sys.stderr)
-    return sorted(by_t.items())
+                continue
+            if cur_t is not None and t != cur_t:
+                if t < cur_t:
+                    continue  # 時間倒退（不應發生），略過
+                yield cur_t, cur
+                cur = []
+            cur_t = t
+            cur.append(ws)
+    if cur_t is not None:
+        yield cur_t, cur
 
 
 # ---------------------------------------------------------------- 工具
@@ -226,8 +241,12 @@ def run(samples, k: int, rmin: float, buffer: float, hold: int, cores: int, csv_
     tot = defaultdict(float)
     prev_present: set = set()
     n_samples = 0
+    first_t = last_t = None
     for t, worlds in samples:
         n_samples += 1
+        if first_t is None:
+            first_t = t
+        last_t = t
         counts = {"paper": 1 if any(w.players for w in worlds) else 0, "world": 0, "folia": 0, "cone": 0}
         loads = {"paper": [], "world": [], "folia": [], "cone": []}
         players_total = 0
@@ -273,7 +292,7 @@ def run(samples, k: int, rmin: float, buffer: float, hold: int, cores: int, csv_
 
     if n_samples == 0:
         return None
-    duration_min = max((samples[-1][0] - samples[0][0]) / 60000.0, 1e-9)
+    duration_min = max((last_t - first_t) / 60000.0, 1e-9)
     res = {"samples": n_samples, "avg_players": tot["players"] / n_samples,
            "merge_split_per_min": (tot["merges"] + tot["splits"]) / duration_min,
            "violations": int(tot["violations"])}
@@ -312,20 +331,22 @@ def main():
     ap.add_argument("--csv", help="輸出每個時間點明細的 CSV 路徑")
     a = ap.parse_args()
 
-    samples = load(a.data, a.sim_dist)
-    if not samples:
-        sys.exit("沒有可用的取樣")
+    if not expand(a.data):
+        sys.exit("找不到取樣檔")
+    samples = lambda: iter_samples(a.data, a.sim_dist)
 
     if a.sweep:
         print(f"{'K':>4}{'r_min':>7}{'緩衝':>6}{'光錐時空數':>10}{'加速':>8}{'合併拆分/分':>12}{'違反':>6}")
         for k, rmin, buf in itertools.product((10, 20, 40), (16, 32, 48), (16, 32, 64)):
-            r = run(samples, k, rmin, buf, a.hold, a.cores)
+            r = run(samples(), k, rmin, buf, a.hold, a.cores)
             print(f"{k:>4}{rmin:>7}{buf:>6}{r['avg_spacetimes_cone']:>13.2f}{r['avg_speedup_cone']:>9.2f}x"
                   f"{r['merge_split_per_min']:>13.2f}{r['violations']:>7}")
         return
 
     rows = [] if a.csv else None
-    r = run(samples, a.k, a.rmin, a.buffer, a.hold, a.cores, rows)
+    r = run(samples(), a.k, a.rmin, a.buffer, a.hold, a.cores, rows)
+    if r is None:
+        sys.exit("沒有可用的取樣")
     print_report(r, a.k, a.rmin, a.buffer, a.hold)
     if rows:
         with open(a.csv, "w", newline="", encoding="utf-8") as f:
