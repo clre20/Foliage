@@ -11,6 +11,14 @@
 | 2 | 世界與區域平行 tick，加上 Paper 插件相容層（插件全域鎖、跨區操作排程） |
 | 3 | 依實體最大速度動態決定區域範圍（時空光錐） |
 
+## 普通方式（序列模式）
+`main` 分支預設開啟。所有區域與全域只用一條 tick 執行緒依序執行，插件呼叫到其他區域的實體、方塊、區塊、物品欄或世界座標時，會暫時切換到該區域執行，效果與 Paper 相同：
+- 所有 Paper 插件都能載入（不需要標示 folia-supported）。
+- BukkitScheduler 同步排程、同步傳送、計分板、建立與卸載世界都可以使用。
+- 這些包裝由 Foliage 在載入插件時改寫插件的位元組碼完成，插件本身不用修改。
+
+測試用 `-Dfoliage.serial-mode=false` 可以關閉（之後只有標示 folia-supported 的插件能載入）。相容層的回歸測試插件在 [tools/compat-test](tools/compat-test)。
+
 ## 下載與安裝
 1. 到 [Releases](https://github.com/clre20/Foliage/releases) 下載 `Foliage-<Minecraft 版本>-<build>.jar`，例如 `Foliage-26.3-12.jar`。
 2. 取代原本的 Paper jar，啟動參數不變（需要 Java 25）。

@@ -1,0 +1,717 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clre20 <167730039+clre20@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 10:45:38 +0800
+Subject: [PATCH] Serial mode plugin compatibility
+
+
+diff --git a/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java b/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..986c31c0e720825714bdb10ad868320b1d06a964
+--- /dev/null
++++ b/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java
+@@ -0,0 +1,317 @@
++package io.github.clre20.foliage.compat;
++
++import com.mojang.logging.LogUtils;
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++import org.objectweb.asm.ClassReader;
++import org.objectweb.asm.ClassVisitor;
++import org.objectweb.asm.ClassWriter;
++import org.objectweb.asm.Label;
++import org.objectweb.asm.MethodVisitor;
++import org.objectweb.asm.Opcodes;
++import org.objectweb.asm.Type;
++import org.slf4j.Logger;
++
++/**
++ * Rewrites plugin bytecode so that every call into a region-bound Bukkit object runs inside the owning region.
++ * <p>
++ * A call such as {@code entity.setHealth(1.0)} becomes {@code foliage$bridge$0(entity, 1.0)}, a synthetic method added to
++ * the same class:
++ * <pre>
++ * static void foliage$bridge$0(Entity e, double h) {
++ *     Object token = RegionContext.enterEntity(e);
++ *     try { e.setHealth(h); } finally { RegionContext.exit(token); }
++ * }
++ * </pre>
++ * The replacement {@code invokestatic} has exactly the same stack effect as the original call, so the original methods'
++ * stack map frames stay valid and are copied unchanged.
++ */
++public final class RegionBridgeTransformer {
++
++    private static final Logger LOGGER = LogUtils.getClassLogger();
++    private static final String CONTEXT = "io/github/clre20/foliage/compat/RegionContext";
++    private static final String OBJECT = "java/lang/Object";
++    private static final String LOCATION_DESC = "Lorg/bukkit/Location;";
++
++    /** World methods whose (int x, int y, int z) arguments are block coordinates. */
++    private static final Set<String> WORLD_XYZ_BLOCK = Set.of(
++        "getBlockAt", "getBlockData", "getType", "setType", "setBlockData", "getBlockState", "getBiome", "setBiome",
++        "getComputedBiome", "getLightLevel"
++    );
++    /** World methods whose (int x, int z) arguments are block coordinates. */
++    private static final Set<String> WORLD_XZ_BLOCK = Set.of("getHighestBlockAt", "getHighestBlockYAt");
++    /** World methods whose (int x, int z) arguments are chunk coordinates. */
++    private static final Set<String> WORLD_XZ_CHUNK = Set.of(
++        "getChunkAt", "isChunkLoaded", "isChunkGenerated", "loadChunk", "unloadChunk", "unloadChunkRequest",
++        "refreshChunk", "regenerateChunk", "getChunkAtAsync", "isChunkForceLoaded", "setChunkForceLoaded",
++        "addPluginChunkTicket", "removePluginChunkTicket", "getPluginChunkTickets", "isChunkInUse"
++    );
++
++    private static volatile boolean warned;
++
++    private RegionBridgeTransformer() {
++    }
++
++    public static byte[] transform(final String pluginName, final byte[] bytecode) {
++        if (!SerialMode.ENABLED || bytecode == null) {
++            return bytecode;
++        }
++        try {
++            final ClassReader reader = new ClassReader(bytecode);
++            final ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
++            final BridgeClassVisitor visitor = new BridgeClassVisitor(writer);
++            reader.accept(visitor, 0);
++            return visitor.changed ? writer.toByteArray() : bytecode;
++        } catch (final Throwable thr) {
++            if (!warned) {
++                warned = true;
++                LOGGER.warn("Could not apply region bridges to a class of plugin {}; it is loaded unchanged", pluginName, thr);
++            }
++            return bytecode;
++        }
++    }
++
++    private enum Kind { ENTITY, BLOCK, CHUNK, INVENTORY, LOCATION, WORLD_XYZ, WORLD_XZ_BLOCK, WORLD_XZ_CHUNK }
++
++    private record Call(int opcode, String owner, String name, String desc, boolean itf) {
++    }
++
++    private record Bridge(String name, Call call, Kind kind, int argIndex) {
++    }
++
++    static Kind classify(final String owner, final String name, final String desc) {
++        if (owner.startsWith("org/bukkit/entity/") || owner.startsWith("org/bukkit/craftbukkit/entity/")) {
++            return Kind.ENTITY;
++        }
++        if ((owner.startsWith("org/bukkit/block/") && !owner.startsWith("org/bukkit/block/data/")
++            && !owner.startsWith("org/bukkit/block/banner/") && !owner.startsWith("org/bukkit/block/sign/")
++            && !owner.startsWith("org/bukkit/block/structure/") && !owner.equals("org/bukkit/block/BlockFace")
++            && !owner.equals("org/bukkit/block/Biome") && !owner.equals("org/bukkit/block/BlockType")
++            && !owner.startsWith("org/bukkit/block/BlockType$"))
++            || owner.startsWith("org/bukkit/craftbukkit/block/")) {
++            return owner.startsWith("org/bukkit/craftbukkit/block/data/") ? null : Kind.BLOCK;
++        }
++        if (owner.equals("org/bukkit/Chunk") || owner.equals("org/bukkit/craftbukkit/CraftChunk")) {
++            return Kind.CHUNK;
++        }
++        if ((owner.startsWith("org/bukkit/inventory/") && owner.endsWith("Inventory"))
++            || owner.startsWith("org/bukkit/craftbukkit/inventory/CraftInventory")) {
++            return Kind.INVENTORY;
++        }
++        if (owner.equals("org/bukkit/World") || owner.equals("org/bukkit/RegionAccessor") || owner.equals("org/bukkit/craftbukkit/CraftWorld")) {
++            if (desc.contains(LOCATION_DESC)) {
++                return Kind.LOCATION;
++            }
++            if (desc.startsWith("(III") && WORLD_XYZ_BLOCK.contains(name)) {
++                return Kind.WORLD_XYZ;
++            }
++            if (desc.startsWith("(II") && WORLD_XZ_BLOCK.contains(name)) {
++                return Kind.WORLD_XZ_BLOCK;
++            }
++            if (desc.startsWith("(II") && WORLD_XZ_CHUNK.contains(name)) {
++                return Kind.WORLD_XZ_CHUNK;
++            }
++        }
++        return null;
++    }
++
++    private static final class BridgeClassVisitor extends ClassVisitor {
++
++        private final Map<Call, Bridge> bridges = new LinkedHashMap<>();
++        private String className;
++        private boolean isInterface;
++        private int version;
++        private boolean skip;
++        boolean changed;
++
++        BridgeClassVisitor(final ClassVisitor next) {
++            super(Opcodes.ASM9, next);
++        }
++
++        @Override
++        public void visit(final int version, final int access, final String name, final String signature, final String superName, final String[] interfaces) {
++            this.className = name;
++            this.version = version & 0xFFFF;
++            this.isInterface = (access & Opcodes.ACC_INTERFACE) != 0;
++            // static methods in interfaces need class file version 52 (Java 8)
++            this.skip = (this.isInterface && this.version < Opcodes.V1_8) || name.startsWith("io/github/clre20/foliage/");
++            super.visit(version, access, name, signature, superName, interfaces);
++        }
++
++        @Override
++        public MethodVisitor visitMethod(final int access, final String name, final String descriptor, final String signature, final String[] exceptions) {
++            final MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
++            if (this.skip || mv == null) {
++                return mv;
++            }
++            return new MethodVisitor(Opcodes.ASM9, mv) {
++                @Override
++                public void visitMethodInsn(final int opcode, final String owner, final String mName, final String mDesc, final boolean itf) {
++                    if (opcode == Opcodes.INVOKEINTERFACE || opcode == Opcodes.INVOKEVIRTUAL) {
++                        final Kind kind = classify(owner, mName, mDesc);
++                        if (kind != null) {
++                            final Bridge bridge = BridgeClassVisitor.this.bridgeFor(new Call(opcode, owner, mName, mDesc, itf), kind);
++                            if (bridge != null) {
++                                super.visitMethodInsn(Opcodes.INVOKESTATIC, BridgeClassVisitor.this.className, bridge.name(),
++                                    bridgeDesc(bridge.call()), BridgeClassVisitor.this.isInterface);
++                                BridgeClassVisitor.this.changed = true;
++                                return;
++                            }
++                        }
++                    }
++                    super.visitMethodInsn(opcode, owner, mName, mDesc, itf);
++                }
++            };
++        }
++
++        Bridge bridgeFor(final Call call, final Kind kind) {
++            final Bridge existing = this.bridges.get(call);
++            if (existing != null) {
++                return existing;
++            }
++            int argIndex = -1;
++            if (kind == Kind.LOCATION) {
++                final Type[] args = Type.getArgumentTypes(call.desc());
++                for (int i = 0; i < args.length; i++) {
++                    if (args[i].getDescriptor().equals(LOCATION_DESC)) {
++                        argIndex = i;
++                        break;
++                    }
++                }
++                if (argIndex < 0) {
++                    return null;
++                }
++            }
++            final Bridge bridge = new Bridge("foliage$bridge$" + this.bridges.size(), call, kind, argIndex);
++            this.bridges.put(call, bridge);
++            return bridge;
++        }
++
++        @Override
++        public void visitEnd() {
++            for (final Bridge bridge : this.bridges.values()) {
++                this.emitBridge(bridge);
++            }
++            super.visitEnd();
++        }
++
++        private void emitBridge(final Bridge bridge) {
++            final Call call = bridge.call();
++            final String desc = bridgeDesc(call);
++            final int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC
++                | (this.isInterface && this.version < Opcodes.V9 ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE);
++            final MethodVisitor mv = this.cv.visitMethod(access, bridge.name(), desc, null, null);
++            mv.visitCode();
++
++            final Type[] params = Type.getArgumentTypes(desc);
++            final int[] slots = new int[params.length];
++            int slot = 0;
++            for (int i = 0; i < params.length; i++) {
++                slots[i] = slot;
++                slot += params[i].getSize();
++            }
++            final int tokenSlot = slot;
++            final Type ret = Type.getReturnType(desc);
++            final int resultSlot = tokenSlot + 1;
++            final int excSlot = tokenSlot + 1;
++
++            // token = RegionContext.enterX(...)
++            switch (bridge.kind()) {
++                case ENTITY -> {
++                    mv.visitVarInsn(Opcodes.ALOAD, 0);
++                    mv.visitMethodInsn(Opcodes.INVOKESTATIC, CONTEXT, "enterEntity", "(Ljava/lang/Object;)Ljava/lang/Object;", false);
++                }
++                case BLOCK -> {
++                    mv.visitVarInsn(Opcodes.ALOAD, 0);
++                    mv.visitMethodInsn(Opcodes.INVOKESTATIC, CONTEXT, "enterBlock", "(Ljava/lang/Object;)Ljava/lang/Object;", false);
++                }
++                case CHUNK -> {
++                    mv.visitVarInsn(Opcodes.ALOAD, 0);
++                    mv.visitMethodInsn(Opcodes.INVOKESTATIC, CONTEXT, "enterChunk", "(Ljava/lang/Object;)Ljava/lang/Object;", false);
++                }
++                case INVENTORY -> {
++                    mv.visitVarInsn(Opcodes.ALOAD, 0);
++                    mv.visitMethodInsn(Opcodes.INVOKESTATIC, CONTEXT, "enterInventory", "(Ljava/lang/Object;)Ljava/lang/Object;", false);
++                }
++                case LOCATION -> {
++                    mv.visitVarInsn(Opcodes.ALOAD, slots[bridge.argIndex() + 1]); // +1: parameter 0 is the receiver
++                    mv.visitMethodInsn(Opcodes.INVOKESTATIC, CONTEXT, "enterLocation", "(Ljava/lang/Object;)Ljava/lang/Object;", false);
++                }
++                case WORLD_XYZ -> { // (receiver, x, y, z, ...)
++                    mv.visitVarInsn(Opcodes.ALOAD, 0);
++                    mv.visitVarInsn(Opcodes.ILOAD, slots[1]);
++                    mv.visitVarInsn(Opcodes.ILOAD, slots[3]);
++                    mv.visitMethodInsn(Opcodes.INVOKESTATIC, CONTEXT, "enterWorldBlock", "(Ljava/lang/Object;II)Ljava/lang/Object;", false);
++                }
++                case WORLD_XZ_BLOCK -> { // (receiver, x, z, ...)
++                    mv.visitVarInsn(Opcodes.ALOAD, 0);
++                    mv.visitVarInsn(Opcodes.ILOAD, slots[1]);
++                    mv.visitVarInsn(Opcodes.ILOAD, slots[2]);
++                    mv.visitMethodInsn(Opcodes.INVOKESTATIC, CONTEXT, "enterWorldBlock", "(Ljava/lang/Object;II)Ljava/lang/Object;", false);
++                }
++                case WORLD_XZ_CHUNK -> {
++                    mv.visitVarInsn(Opcodes.ALOAD, 0);
++                    mv.visitVarInsn(Opcodes.ILOAD, slots[1]);
++                    mv.visitVarInsn(Opcodes.ILOAD, slots[2]);
++                    mv.visitMethodInsn(Opcodes.INVOKESTATIC, CONTEXT, "enterWorldChunk", "(Ljava/lang/Object;II)Ljava/lang/Object;", false);
++                }
++            }
++            mv.visitVarInsn(Opcodes.ASTORE, tokenSlot);
++
++            final Label start = new Label();
++            final Label end = new Label();
++            final Label handler = new Label();
++            mv.visitTryCatchBlock(start, end, handler, null);
++            mv.visitLabel(start);
++            for (int i = 0; i < params.length; i++) {
++                mv.visitVarInsn(params[i].getOpcode(Opcodes.ILOAD), slots[i]);
++            }
++            mv.visitMethodInsn(call.opcode(), call.owner(), call.name(), call.desc(), call.itf());
++            if (ret.getSort() != Type.VOID) {
++                mv.visitVarInsn(ret.getOpcode(Opcodes.ISTORE), resultSlot);
++            }
++            mv.visitLabel(end);
++            mv.visitVarInsn(Opcodes.ALOAD, tokenSlot);
++            mv.visitMethodInsn(Opcodes.INVOKESTATIC, CONTEXT, "exit", "(Ljava/lang/Object;)V", false);
++            if (ret.getSort() != Type.VOID) {
++                mv.visitVarInsn(ret.getOpcode(Opcodes.ILOAD), resultSlot);
++            }
++            mv.visitInsn(ret.getOpcode(Opcodes.IRETURN));
++
++            mv.visitLabel(handler);
++            if (this.version >= Opcodes.V1_6) {
++                final List<Object> locals = new ArrayList<>();
++                for (final Type p : params) {
++                    locals.add(frameType(p));
++                }
++                locals.add(OBJECT);
++                mv.visitFrame(Opcodes.F_FULL, locals.size(), locals.toArray(), 1, new Object[] {"java/lang/Throwable"});
++            }
++            mv.visitVarInsn(Opcodes.ASTORE, excSlot);
++            mv.visitVarInsn(Opcodes.ALOAD, tokenSlot);
++            mv.visitMethodInsn(Opcodes.INVOKESTATIC, CONTEXT, "exit", "(Ljava/lang/Object;)V", false);
++            mv.visitVarInsn(Opcodes.ALOAD, excSlot);
++            mv.visitInsn(Opcodes.ATHROW);
++            mv.visitMaxs(0, 0); // computed
++            mv.visitEnd();
++        }
++    }
++
++    static String bridgeDesc(final Call call) {
++        return "(L" + call.owner() + ";" + call.desc().substring(1);
++    }
++
++    private static Object frameType(final Type t) {
++        return switch (t.getSort()) {
++            case Type.BOOLEAN, Type.BYTE, Type.CHAR, Type.SHORT, Type.INT -> Opcodes.INTEGER;
++            case Type.FLOAT -> Opcodes.FLOAT;
++            case Type.LONG -> Opcodes.LONG;
++            case Type.DOUBLE -> Opcodes.DOUBLE;
++            case Type.ARRAY -> t.getDescriptor();
++            default -> t.getInternalName();
++        };
++    }
++}
+diff --git a/src/main/java/io/github/clre20/foliage/compat/RegionContext.java b/src/main/java/io/github/clre20/foliage/compat/RegionContext.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..a21166683373858094e167054276392487d65d5e
+--- /dev/null
++++ b/src/main/java/io/github/clre20/foliage/compat/RegionContext.java
+@@ -0,0 +1,141 @@
++package io.github.clre20.foliage.compat;
++
++import ca.spottedleaf.moonrise.common.util.TickThread;
++import io.papermc.paper.threadedregions.ThreadedRegionizer;
++import io.papermc.paper.threadedregions.TickRegionScheduler;
++import io.papermc.paper.threadedregions.TickRegions;
++import net.minecraft.server.level.ServerLevel;
++import org.bukkit.Chunk;
++import org.bukkit.Location;
++import org.bukkit.block.Block;
++import org.bukkit.block.BlockState;
++import org.bukkit.craftbukkit.CraftWorld;
++import org.bukkit.craftbukkit.entity.CraftEntity;
++
++/**
++ * Temporarily switches the current region to the region owning the object a plugin is about to access.
++ * Every plugin call into a region-bound Bukkit object is wrapped as {@code token = enterX(target); try { call } finally { exit(token); }}
++ * by {@link RegionBridgeTransformer}. Only active in {@link SerialMode}, where no two regions tick at the same time.
++ */
++public final class RegionContext {
++
++    /** Returned when no switch happened. */
++    private static final Object NONE = new Object();
++    /** Returned when the previous region was "no region" (global tick, plugin enable, console). */
++    private static final Object NO_REGION = new Object();
++
++    private RegionContext() {
++    }
++
++    public static Object enterEntity(final Object entity) {
++        if (!SerialMode.ENABLED || !(entity instanceof CraftEntity craft)) {
++            return NONE;
++        }
++        return enterNms(craft.getHandleRaw());
++    }
++
++    public static Object enterBlock(final Object block) {
++        if (!SerialMode.ENABLED) {
++            return NONE;
++        }
++        if (block instanceof Block b) {
++            return enterWorld(b.getWorld(), b.getX() >> 4, b.getZ() >> 4);
++        }
++        if (block instanceof BlockState s && s.isPlaced()) {
++            return enterWorld(s.getWorld(), s.getX() >> 4, s.getZ() >> 4);
++        }
++        return NONE;
++    }
++
++    public static Object enterLocation(final Object location) {
++        if (!SerialMode.ENABLED || !(location instanceof Location loc) || !loc.isWorldLoaded()) {
++            return NONE;
++        }
++        return enterWorld(loc.getWorld(), loc.getBlockX() >> 4, loc.getBlockZ() >> 4);
++    }
++
++    public static Object enterChunk(final Object chunk) {
++        if (!SerialMode.ENABLED || !(chunk instanceof Chunk c)) {
++            return NONE;
++        }
++        return enterWorld(c.getWorld(), c.getX(), c.getZ());
++    }
++
++    public static Object enterInventory(final Object inventory) {
++        if (!SerialMode.ENABLED || !(inventory instanceof org.bukkit.craftbukkit.inventory.CraftInventory craft) || !TickThread.isTickThread()) {
++            return NONE;
++        }
++        // use the underlying container directly: Bukkit's getHolder()/getLocation() may already read the world
++        net.minecraft.world.Container container = craft.getInventory();
++        if (container instanceof net.minecraft.world.CompoundContainer compound) {
++            container = compound.container1;
++        }
++        if (container instanceof net.minecraft.world.level.block.entity.BlockEntity blockEntity
++            && blockEntity.getLevel() instanceof ServerLevel level) {
++            return enter(level, blockEntity.getBlockPos().getX() >> 4, blockEntity.getBlockPos().getZ() >> 4);
++        }
++        if (container instanceof net.minecraft.world.entity.player.Inventory playerInventory) {
++            return enterNms(playerInventory.player);
++        }
++        if (container instanceof net.minecraft.world.entity.Entity entity) {
++            return enterNms(entity);
++        }
++        return NONE;
++    }
++
++    private static Object enterNms(final net.minecraft.world.entity.Entity handle) {
++        if (handle == null || !(handle.level() instanceof ServerLevel level)) {
++            return NONE;
++        }
++        return enter(level, handle.chunkPosition().x(), handle.chunkPosition().z());
++    }
++
++    public static Object enterWorldBlock(final Object world, final int blockX, final int blockZ) {
++        if (!SerialMode.ENABLED) {
++            return NONE;
++        }
++        return enterWorld(world, blockX >> 4, blockZ >> 4);
++    }
++
++    public static Object enterWorldChunk(final Object world, final int chunkX, final int chunkZ) {
++        if (!SerialMode.ENABLED) {
++            return NONE;
++        }
++        return enterWorld(world, chunkX, chunkZ);
++    }
++
++    private static Object enterWorld(final Object world, final int chunkX, final int chunkZ) {
++        if (!(world instanceof CraftWorld craftWorld)) {
++            return NONE;
++        }
++        return enter(craftWorld.getHandle(), chunkX, chunkZ);
++    }
++
++    private static Object enter(final ServerLevel level, final int chunkX, final int chunkZ) {
++        if (!TickThread.isTickThread()) {
++            return NONE;
++        }
++        final ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData> target =
++            level.regioniser.getRegionAtUnsynchronised(chunkX, chunkZ);
++        if (target == null) {
++            return NONE;
++        }
++        final ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData> current =
++            TickRegionScheduler.getCurrentRegion();
++        if (target == current) {
++            return NONE;
++        }
++        final ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData> previous =
++            TickRegionScheduler.swapTickingRegion(target);
++        return previous == null ? NO_REGION : previous;
++    }
++
++    @SuppressWarnings("unchecked")
++    public static void exit(final Object token) {
++        if (token == NONE) {
++            return;
++        }
++        TickRegionScheduler.swapTickingRegion(token == NO_REGION ? null
++            : (ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData>) token);
++    }
++}
+diff --git a/src/main/java/io/github/clre20/foliage/compat/SerialMode.java b/src/main/java/io/github/clre20/foliage/compat/SerialMode.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..9386ac2883cce71451189ea61aaedd2d18da737e
+--- /dev/null
++++ b/src/main/java/io/github/clre20/foliage/compat/SerialMode.java
+@@ -0,0 +1,20 @@
++package io.github.clre20.foliage.compat;
++
++/**
++ * "Normal mode" for plugins that are not known to be safe for parallel region ticking.
++ * <p>
++ * While enabled, all regions and the global region tick on a single tick thread, so plugin code never runs
++ * concurrently with any region. Plugin calls into objects owned by another region are routed by temporarily
++ * switching the current region (see {@link RegionContext}), which keeps Folia's per-region data consistent.
++ * The result is the same behaviour as a single-threaded Paper server, while the region structure stays in place
++ * for later parallelisation.
++ * <p>
++ * Disable for testing with {@code -Dfoliage.serial-mode=false} (then only Folia-supported plugins may load).
++ */
++public final class SerialMode {
++
++    public static final boolean ENABLED = !"false".equalsIgnoreCase(System.getProperty("foliage.serial-mode", "true"));
++
++    private SerialMode() {
++    }
++}
+diff --git a/src/main/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifier.java b/src/main/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifier.java
+index f9a2c55a354c877749db3f92956de802ae575788..a4c6e7121189a5aa69468fcd24915a6e47c478d5 100644
+--- a/src/main/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifier.java
++++ b/src/main/java/io/papermc/paper/plugin/entrypoint/classloader/PaperClassloaderBytecodeModifier.java
+@@ -7,6 +7,6 @@ public class PaperClassloaderBytecodeModifier implements ClassloaderBytecodeModi
+ 
+     @Override
+     public byte[] modify(PluginMeta configuration, byte[] bytecode) {
+-        return bytecode;
++        return io.github.clre20.foliage.compat.RegionBridgeTransformer.transform(configuration.getName(), bytecode); // Foliage - serial mode region bridges
+     }
+ }
+diff --git a/src/main/java/io/papermc/paper/plugin/provider/type/paper/PaperPluginProviderFactory.java b/src/main/java/io/papermc/paper/plugin/provider/type/paper/PaperPluginProviderFactory.java
+index 6369b13e1fcdbdb25dd9d6e4d3bffdedbee4f739..07e07e24b1d67000fad5b93ae0654d0364f462f1 100644
+--- a/src/main/java/io/papermc/paper/plugin/provider/type/paper/PaperPluginProviderFactory.java
++++ b/src/main/java/io/papermc/paper/plugin/provider/type/paper/PaperPluginProviderFactory.java
+@@ -25,7 +25,7 @@ class PaperPluginProviderFactory implements PluginTypeFactory<PaperPluginParent,
+     @Override
+     public PaperPluginParent build(JarFile file, PaperPluginMeta configuration, Path source) {
+         // Folia start - block plugins not marked as supported
+-        if (!configuration.isFoliaSupported()) {
++        if (!configuration.isFoliaSupported() && !io.github.clre20.foliage.compat.SerialMode.ENABLED) { // Foliage - serial mode
+             throw new RuntimeException("Could not load plugin '" + configuration.getDisplayName() + "' as it is not marked as supporting Folia!");
+         }
+         // Folia end - block plugins not marked as supported
+diff --git a/src/main/java/io/papermc/paper/plugin/provider/type/spigot/SpigotPluginProviderFactory.java b/src/main/java/io/papermc/paper/plugin/provider/type/spigot/SpigotPluginProviderFactory.java
+index 6ef0042a355c65262bdb89dcf151bd644653216d..d799ef320e443d547de8eaa6a04f194c4c276650 100644
+--- a/src/main/java/io/papermc/paper/plugin/provider/type/spigot/SpigotPluginProviderFactory.java
++++ b/src/main/java/io/papermc/paper/plugin/provider/type/spigot/SpigotPluginProviderFactory.java
+@@ -27,7 +27,7 @@ class SpigotPluginProviderFactory implements PluginTypeFactory<SpigotPluginProvi
+     @Override
+     public SpigotPluginProvider build(JarFile file, PluginDescriptionFile configuration, Path source) throws InvalidDescriptionException {
+         // Folia start - block plugins not marked as supported
+-        if (!configuration.isFoliaSupported()) {
++        if (!configuration.isFoliaSupported() && !io.github.clre20.foliage.compat.SerialMode.ENABLED) { // Foliage - serial mode
+             throw new RuntimeException("Could not load plugin '" + configuration.getDisplayName() + "' as it is not marked as supporting Folia!");
+         }
+         // Folia end - block plugins not marked as supported
+diff --git a/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaAsyncScheduler.java b/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaAsyncScheduler.java
+index 34add668cbc1d3a43d973b65f33988c58142fff0..dc2bdc441828095b0cbf0364e66b66d91685e640 100644
+--- a/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaAsyncScheduler.java
++++ b/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaAsyncScheduler.java
+@@ -32,7 +32,7 @@ public final class FoliaAsyncScheduler implements AsyncScheduler {
+             public Thread newThread(final Runnable run) {
+                 final Thread ret = new Thread(run);
+ 
+-                ret.setName("Folia Async Scheduler Thread #" + this.idGenerator.getAndIncrement());
++                ret.setName("Foliage Async Scheduler Thread #" + this.idGenerator.getAndIncrement());
+                 ret.setPriority(Thread.NORM_PRIORITY - 1);
+                 ret.setUncaughtExceptionHandler((final Thread thread, final Throwable thr) -> {
+                     LOGGER.error("Uncaught exception in thread: " + thread.getName(), thr);
+@@ -48,7 +48,7 @@ public final class FoliaAsyncScheduler implements AsyncScheduler {
+         public Thread newThread(final Runnable run) {
+             final Thread ret = new Thread(run);
+ 
+-            ret.setName("Folia Async Scheduler Thread Timer");
++            ret.setName("Foliage Async Scheduler Thread Timer");
+             ret.setPriority(Thread.NORM_PRIORITY + 1);
+             ret.setUncaughtExceptionHandler((final Thread thread, final Throwable thr) -> {
+                 LOGGER.error("Uncaught exception in thread: " + thread.getName(), thr);
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index 2cc1b8c44e1f76f3e058d631f101aa06ee5edc2a..b184a6ef4b26bc2d6528a13e46819d02783cc6ca 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -1180,7 +1180,7 @@ public final class CraftServer implements Server {
+ 
+     @Override
+     public World createWorld(WorldCreator creator) {
+-        if (true) throw new UnsupportedOperationException(); // Folia - not implemented properly yet
++        if (!io.github.clre20.foliage.compat.SerialMode.ENABLED) throw new UnsupportedOperationException(); // Folia - not implemented properly yet // Foliage - serial mode
+         Preconditions.checkState(this.console.getAllLevels().iterator().hasNext(), "Cannot create additional worlds on STARTUP");
+         //Preconditions.checkState(!this.console.isIteratingOverLevels, "Cannot create a world while worlds are being ticked"); // Paper - Cat - Temp disable. We'll see how this goes.
+         Preconditions.checkArgument(creator != null, "WorldCreator cannot be null");
+@@ -1338,7 +1338,7 @@ public final class CraftServer implements Server {
+ 
+     @Override
+     public boolean unloadWorld(World world, boolean save) {
+-        if (true) throw new UnsupportedOperationException(); // Folia - not implemented properly yet
++        if (!io.github.clre20.foliage.compat.SerialMode.ENABLED) throw new UnsupportedOperationException(); // Folia - not implemented properly yet // Foliage - serial mode
+         //Preconditions.checkState(!this.console.isIteratingOverLevels, "Cannot unload a world while worlds are being ticked"); // Paper - Cat - Temp disable. We'll see how this goes.
+         if (world == null) {
+             return false;
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
+index 359b4f32cff7566dbdfeaddf003779abab74b8c5..ef52e6c5ea7a3322cc2e1e3b1965d565cdbeff32 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
+@@ -327,9 +327,17 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
+ 
+     protected boolean teleport0(Location location, TeleportCause cause, TeleportFlag... flags) {
+         // Folia start - region threading
+-        if (true) {
++        // Foliage start - serial mode: teleports inside the owning region stay synchronous, other teleports complete asynchronously
++        if (!io.github.clre20.foliage.compat.SerialMode.ENABLED) {
+             throw new UnsupportedOperationException("Must use teleportAsync while in region threading");
+         }
++        if (location.getWorld() != this.getWorld()
++            || !ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(((org.bukkit.craftbukkit.CraftWorld) location.getWorld()).getHandle(), location.getBlockX() >> 4, location.getBlockZ() >> 4)
++            || !ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(this.getHandleRaw())) {
++            this.teleportAsync(location, cause, flags);
++            return true;
++        }
++        // Foliage end - serial mode
+         // Folia end - region threading
+         Entity entity = this.getHandle();
+         if (!entity.isAlive() || !entity.valid) {
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+index 8852a7116c6d1978ebe7c2ad333dbf871ad281ae..2bfd1b4abd49382af7ade987f30d347cd291bf1e 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+@@ -1343,9 +1343,17 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
+     @Override
+     protected boolean teleport0(Location location, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause cause, io.papermc.paper.entity.TeleportFlag... flags) {
+         // Folia start - region threading
+-        if (true) {
++        // Foliage start - serial mode: teleports inside the owning region stay synchronous, other teleports complete asynchronously
++        if (!io.github.clre20.foliage.compat.SerialMode.ENABLED) {
+             throw new UnsupportedOperationException("Must use teleportAsync while in region threading");
+         }
++        if (location.getWorld() != this.getWorld()
++            || !ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(((org.bukkit.craftbukkit.CraftWorld) location.getWorld()).getHandle(), location.getBlockX() >> 4, location.getBlockZ() >> 4)
++            || !ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(this.getHandleRaw())) {
++            this.teleportAsync(location, cause, flags);
++            return true;
++        }
++        // Foliage end - serial mode
+         // Folia end - region threading
+         if (this.getHandle().connection == null) {
+             return false;
+diff --git a/src/main/java/org/bukkit/craftbukkit/scheduler/CraftScheduler.java b/src/main/java/org/bukkit/craftbukkit/scheduler/CraftScheduler.java
+index c4dcddc4db02ed3641d05fae31ead7c13205f841..1b95d6525af96b7a6f22841927c8b1f5d234296e 100644
+--- a/src/main/java/org/bukkit/craftbukkit/scheduler/CraftScheduler.java
++++ b/src/main/java/org/bukkit/craftbukkit/scheduler/CraftScheduler.java
+@@ -514,7 +514,7 @@ public class CraftScheduler implements BukkitScheduler {
+     }
+ 
+     protected CraftTask handle(final CraftTask task, final long delay) { // Paper
+-        if (true) throw new UnsupportedOperationException(); // Folia - region threading
++        if (!io.github.clre20.foliage.compat.SerialMode.ENABLED) throw new UnsupportedOperationException(); // Folia - region threading // Foliage - serial mode
+         // Paper start
+         if (!this.isAsyncScheduler && !task.isSync()) {
+             this.asyncScheduler.handle(task, delay);
+diff --git a/src/main/java/org/bukkit/craftbukkit/scoreboard/CraftScoreboard.java b/src/main/java/org/bukkit/craftbukkit/scoreboard/CraftScoreboard.java
+index b959fe4311fc6cbae3dcc052ef4710f8c8aefec6..e4f59ae1491eb5ed935f8f48a2e5cd01f5892039 100644
+--- a/src/main/java/org/bukkit/craftbukkit/scoreboard/CraftScoreboard.java
++++ b/src/main/java/org/bukkit/craftbukkit/scoreboard/CraftScoreboard.java
+@@ -32,7 +32,7 @@ public final class CraftScoreboard implements org.bukkit.scoreboard.Scoreboard {
+ 
+     @Override
+     public Objective registerNewObjective(String name, Criteria criteria, net.kyori.adventure.text.Component displayName, RenderType renderType) throws IllegalArgumentException {
+-        if (true) throw new UnsupportedOperationException(); // Folia - not supported yet
++        if (!io.github.clre20.foliage.compat.SerialMode.ENABLED) throw new UnsupportedOperationException(); // Folia - not supported yet // Foliage - serial mode
+         if (displayName == null) {
+             displayName = net.kyori.adventure.text.Component.empty();
+         }
+@@ -178,7 +178,7 @@ public final class CraftScoreboard implements org.bukkit.scoreboard.Scoreboard {
+ 
+     @Override
+     public Team registerNewTeam(String name) {
+-        if (true) throw new UnsupportedOperationException(); // Folia - not supported yet
++        if (!io.github.clre20.foliage.compat.SerialMode.ENABLED) throw new UnsupportedOperationException(); // Folia - not supported yet // Foliage - serial mode
+         Preconditions.checkArgument(name != null, "Team name cannot be null");
+         Preconditions.checkArgument(name.length() <= Short.MAX_VALUE, "Team name '%s' is longer than the limit of 32767 characters (%s)", name, name.length());
+         Preconditions.checkArgument(this.getHandle().getPlayerTeam(name) == null, "Team name '%s' is already in use", name);
+@@ -206,7 +206,7 @@ public final class CraftScoreboard implements org.bukkit.scoreboard.Scoreboard {
+ 
+     @Override
+     public void clearSlot(DisplaySlot slot) {
+-        if (true) throw new UnsupportedOperationException(); // Folia - not supported yet
++        if (!io.github.clre20.foliage.compat.SerialMode.ENABLED) throw new UnsupportedOperationException(); // Folia - not supported yet // Foliage - serial mode
+         Preconditions.checkArgument(slot != null, "Slot cannot be null");
+         this.getHandle().setDisplayObjective(CraftScoreboardTranslations.fromBukkitSlot(slot), null);
+     }
+diff --git a/src/main/java/org/bukkit/craftbukkit/scoreboard/CraftScoreboardManager.java b/src/main/java/org/bukkit/craftbukkit/scoreboard/CraftScoreboardManager.java
+index ab76c7f9bb0a4980a07a4d08c0d3ecadbca9668b..27e8885f51f43c7e1d4737b92cfa41319b9fe88c 100644
+--- a/src/main/java/org/bukkit/craftbukkit/scoreboard/CraftScoreboardManager.java
++++ b/src/main/java/org/bukkit/craftbukkit/scoreboard/CraftScoreboardManager.java
+@@ -38,7 +38,7 @@ public final class CraftScoreboardManager implements ScoreboardManager {
+ 
+     @Override
+     public CraftScoreboard getNewScoreboard() {
+-        if (true) throw new UnsupportedOperationException(); // Folia - not supported yet
++        if (!io.github.clre20.foliage.compat.SerialMode.ENABLED) throw new UnsupportedOperationException(); // Folia - not supported yet // Foliage - serial mode
+         org.spigotmc.AsyncCatcher.catchOp("scoreboard creation"); // Spigot
+         CraftScoreboard scoreboard = new CraftScoreboard(new ServerScoreboard(this.server));
+         if (io.papermc.paper.configuration.GlobalConfiguration.get().scoreboards.trackPluginScoreboards) {
+@@ -59,7 +59,7 @@ public final class CraftScoreboardManager implements ScoreboardManager {
+     }
+ 
+     public void setPlayerBoard(CraftPlayer player, CraftScoreboard scoreboard) {
+-        if (true) throw new UnsupportedOperationException(); // Folia - not supported yet
++        if (!io.github.clre20.foliage.compat.SerialMode.ENABLED) throw new UnsupportedOperationException(); // Folia - not supported yet // Foliage - serial mode
+         net.minecraft.world.scores.Scoreboard oldBoard = this.getPlayerBoard(player).getHandle();
+         net.minecraft.world.scores.Scoreboard newBoard = scoreboard.getHandle();
+         if (oldBoard == newBoard) {
+diff --git a/src/main/java/org/bukkit/craftbukkit/util/CraftMagicNumbers.java b/src/main/java/org/bukkit/craftbukkit/util/CraftMagicNumbers.java
+index 3afdecc8ce6fdcfc1d13a1d210c842d0e40f09c4..90a10887dd9b8efe80d5ff7816e1790a2c518526 100644
+--- a/src/main/java/org/bukkit/craftbukkit/util/CraftMagicNumbers.java
++++ b/src/main/java/org/bukkit/craftbukkit/util/CraftMagicNumbers.java
+@@ -379,7 +379,7 @@ public final class CraftMagicNumbers implements UnsafeValues {
+         }
+ 
+         // Folia start - block plugins not marked as supported
+-        if (!descriptionFile.isFoliaSupported()) {
++        if (!descriptionFile.isFoliaSupported() && !io.github.clre20.foliage.compat.SerialMode.ENABLED) { // Foliage - serial mode
+             throw new InvalidPluginException("Plugin " + descriptionFile.getFullName() + " is not marked as supporting regionised multithreading");
+         }
+         // Folia end - block plugins not marked as supported
+@@ -404,6 +404,7 @@ public final class CraftMagicNumbers implements UnsafeValues {
+ 
+     @Override
+     public byte[] processClass(PluginDescriptionFile pdf, String path, byte[] clazz) {
++        clazz = io.github.clre20.foliage.compat.RegionBridgeTransformer.transform(pdf.getName(), clazz); // Foliage - serial mode region bridges
+         // Paper start
+         if (DISABLE_OLD_API_SUPPORT) {
+             return clazz;

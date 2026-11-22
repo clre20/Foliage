@@ -1,0 +1,4 @@
+name: CompatTest
+version: '1'
+main: t.CompatTest
+api-version: '26.3'

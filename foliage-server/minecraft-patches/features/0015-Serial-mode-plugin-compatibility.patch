@@ -1,0 +1,168 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clre20 <167730039+clre20@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 10:45:38 +0800
+Subject: [PATCH] Serial mode plugin compatibility
+
+
+diff --git a/io/papermc/paper/threadedregions/FoliaWatchdogThread.java b/io/papermc/paper/threadedregions/FoliaWatchdogThread.java
+index e9ca1a15049b0211d10401cb78e953b93afaf6c7..c8a3d87f3688b226ed3b244f1a5fe3360b973bd8 100644
+--- a/io/papermc/paper/threadedregions/FoliaWatchdogThread.java
++++ b/io/papermc/paper/threadedregions/FoliaWatchdogThread.java
+@@ -35,7 +35,7 @@ public final class FoliaWatchdogThread extends Thread {
+     private final LinkedHashSet<RunningTick> ticks = new LinkedHashSet<>();
+ 
+     public FoliaWatchdogThread() {
+-        super("Folia Watchdog Thread");
++        super("Foliage Watchdog Thread");
+         this.setDaemon(true);
+         this.setUncaughtExceptionHandler((final Thread thread, final Throwable throwable) -> {
+             LOGGER.error("Uncaught exception in thread '" + thread.getName() + "'", throwable);
+diff --git a/io/papermc/paper/threadedregions/RegionizedServer.java b/io/papermc/paper/threadedregions/RegionizedServer.java
+index 2cd24e12a545781acfae24c980d8e56fb7576a0a..4c9f4327b26b03202cd06e5d7b363175e98f8fe6 100644
+--- a/io/papermc/paper/threadedregions/RegionizedServer.java
++++ b/io/papermc/paper/threadedregions/RegionizedServer.java
+@@ -135,6 +135,11 @@ public final class RegionizedServer {
+     }
+ 
+     public static boolean isGlobalTickThread() {
++        // Foliage start - serial mode: only one tick thread exists, so global data may be touched from any region
++        if (io.github.clre20.foliage.compat.SerialMode.ENABLED && ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()) {
++            return true;
++        }
++        // Foliage end - serial mode
+         return INSTANCE.tickHandle == TickRegionScheduler.getCurrentTickingTask();
+     }
+ 
+@@ -240,6 +245,11 @@ public final class RegionizedServer {
+ 
+         // scheduler
+         ((FoliaGlobalRegionScheduler)Bukkit.getGlobalRegionScheduler()).tick();
++        // Foliage start - serial mode: run BukkitScheduler sync tasks on the global region
++        if (io.github.clre20.foliage.compat.SerialMode.ENABLED) {
++            ((org.bukkit.craftbukkit.scheduler.CraftScheduler)Bukkit.getScheduler()).mainThreadHeartbeat();
++        }
++        // Foliage end - serial mode
+ 
+         // clock tick
+         this.tickClocks();
+diff --git a/io/papermc/paper/threadedregions/TickRegionScheduler.java b/io/papermc/paper/threadedregions/TickRegionScheduler.java
+index 5a72fa0d72bfdb927293abe921c57f6ae964a6ec..7a6c537cd9a04b5687a492e52f7d57e9934feaca 100644
+--- a/io/papermc/paper/threadedregions/TickRegionScheduler.java
++++ b/io/papermc/paper/threadedregions/TickRegionScheduler.java
+@@ -62,11 +62,11 @@ public final class TickRegionScheduler {
+             // on Linux, thread affinity is copied from the parent thread - but we do not want that, so we need
+             // to adjust the thread affinity of child threads
+             // the group allows the numa instance to accurately collect the child threads
+-            private final ThreadGroup threadGroup = new ThreadGroup("Folia Region Scheduler ThreadGroup");
++            private final ThreadGroup threadGroup = new ThreadGroup("Foliage Region Scheduler ThreadGroup");
+ 
+             @Override
+             public Thread newThread(final Runnable run) {
+-                final Thread ret = new TickThreadRunner(this.threadGroup, run, "Folia Region Scheduler Thread #" + this.idGenerator.getAndIncrement());
++                final Thread ret = new TickThreadRunner(this.threadGroup, run, "Foliage Region Scheduler Thread #" + this.idGenerator.getAndIncrement());
+                 ret.setUncaughtExceptionHandler(TickRegionScheduler.this::uncaughtException);
+                 return ret;
+             }
+@@ -106,7 +106,7 @@ public final class TickRegionScheduler {
+                 threadAllocation = new Int2IntLinkedOpenHashMap();
+                 threadAllocation.put(0, threads);
+ 
+-                LOGGER.info("Folia is using " + threads + " tick threads");
++                LOGGER.info("Foliage is using " + threads + " tick threads");
+             } else {
+                 final int nodes = stealingScheduledThreadPool.getNuma().getTotalNumaNodes();
+ 
+@@ -117,7 +117,7 @@ public final class TickRegionScheduler {
+                     threadAllocation.put(i, threadsPerNode);
+                 }
+ 
+-                LOGGER.info("Folia is using " + threadsPerNode + " tick threads per NUMA node, with " + nodes + " NUMA nodes detected");
++                LOGGER.info("Foliage is using " + threadsPerNode + " tick threads per NUMA node, with " + nodes + " NUMA nodes detected");
+             }
+ 
+             stealingScheduledThreadPool.setThreadAllocation(threadAllocation, stealThresholdNS, taskTimeSliceNS);
+@@ -152,6 +152,27 @@ public final class TickRegionScheduler {
+         }
+     }
+ 
++    // Foliage start - serial mode: temporarily switch the current region for plugin calls into another region
++    public static ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData> swapTickingRegion(
++        final ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData> region
++    ) {
++        if (!(Thread.currentThread() instanceof TickThreadRunner tickThreadRunner)) {
++            throw new IllegalStateException("Must be tick thread runner");
++        }
++        final ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData> previous = tickThreadRunner.currentTickingRegion;
++        tickThreadRunner.currentTickingRegion = region;
++        if (region != null) {
++            tickThreadRunner.currentTickingWorldRegionizedData = region.regioniser.world.worldRegionData.get();
++            final ca.spottedleaf.leafprofiler.RegionizedProfiler.Handle profiler = region.getData().profiler;
++            tickThreadRunner.profiler = profiler == null ? ca.spottedleaf.leafprofiler.RegionizedProfiler.Handle.NO_OP_HANDLE : profiler;
++        } else {
++            tickThreadRunner.currentTickingWorldRegionizedData = null;
++            tickThreadRunner.profiler = ca.spottedleaf.leafprofiler.RegionizedProfiler.Handle.NO_OP_HANDLE;
++        }
++        return previous;
++    }
++    // Foliage end - serial mode
++
+     private static void setTickTask(final SchedulableTick task) {
+         final Thread currThread = Thread.currentThread();
+         if (!(currThread instanceof TickThreadRunner tickThreadRunner)) {
+diff --git a/io/papermc/paper/threadedregions/TickRegions.java b/io/papermc/paper/threadedregions/TickRegions.java
+index a6ab9cb01f4f49f5f44b6ed324fa6d51139aabb6..a60e4bf4e64a7423cd02e369d03d6898446daa03 100644
+--- a/io/papermc/paper/threadedregions/TickRegions.java
++++ b/io/papermc/paper/threadedregions/TickRegions.java
+@@ -42,6 +42,11 @@ public final class TickRegions implements ThreadedRegionizer.RegionCallbacks<Tic
+     }
+ 
+     private static int getTickThreads(final GlobalConfiguration.ThreadedRegions config) {
++        // Foliage start - serial mode: regions never tick concurrently while plugins run in normal mode
++        if (io.github.clre20.foliage.compat.SerialMode.ENABLED) {
++            return 1;
++        }
++        // Foliage end - serial mode
+         int tickThreads;
+         if (config.threads <= 0) {
+             tickThreads = OSNuma.getNativeInstance().getTotalCores() / 2;
+@@ -71,7 +76,7 @@ public final class TickRegions implements ThreadedRegionizer.RegionCallbacks<Tic
+         gridExponent = Math.min(31, gridExponent);
+         regionShift = gridExponent;
+         scheduler = new TickRegionScheduler(config.scheduler, tickThreads);
+-        LOGGER.info("Initialised " + config.scheduler + " Folia scheduler with initial " + tickThreads + " target thread(s)");
++        LOGGER.info("Initialised " + config.scheduler + " region scheduler with initial " + tickThreads + " target thread(s)" + (io.github.clre20.foliage.compat.SerialMode.ENABLED ? " (serial mode)" : "")); // Foliage
+     }
+ 
+     public static void start() {
+diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
+index feb1a72f3d2765dacb354f34723ababec458a27e..f6b1d7077cdc305a6a623c469ced22082983cd83 100644
+--- a/net/minecraft/server/level/ServerPlayer.java
++++ b/net/minecraft/server/level/ServerPlayer.java
+@@ -2023,7 +2023,10 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+     @Override
+     public @Nullable ServerPlayer teleport(TeleportTransition transition) { // Paper - make non-final
+         // Folia start - region threading
+-        if (true) {
++        // Foliage start - serial mode: same-level teleports inside the owning region stay synchronous
++        if (!(io.github.clre20.foliage.compat.SerialMode.ENABLED && transition.newLevel() == this.level()
++            && ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(transition.newLevel(), net.minecraft.util.Mth.floor(transition.position().x) >> 4, net.minecraft.util.Mth.floor(transition.position().z) >> 4))) {
++        // Foliage end - serial mode
+             throw new UnsupportedOperationException("Must use teleportAsync while in region threading");
+         }
+         // Folia end - region threading
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index aeebbdeb8530b572871eb211d06e262b0dc901e1..a1989abd596401caa7e91735c6849e55dd02e60e 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -5091,7 +5091,10 @@ public abstract class Entity
+ 
+     public @Nullable Entity teleport(TeleportTransition transition) { // Paper - remove param final
+         // Folia start - region threading
+-        if (true) {
++        // Foliage start - serial mode: same-level teleports inside the owning region stay synchronous
++        if (!(io.github.clre20.foliage.compat.SerialMode.ENABLED && transition.newLevel() == this.level()
++            && ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(transition.newLevel(), net.minecraft.util.Mth.floor(transition.position().x) >> 4, net.minecraft.util.Mth.floor(transition.position().z) >> 4))) {
++        // Foliage end - serial mode
+             throw new UnsupportedOperationException("Must use teleportAsync while in region threading");
+         }
+         // Folia end - region threading
