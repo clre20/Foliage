@@ -1,0 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clre20 <167730039+clre20@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 19:26:12 +0800
+Subject: [PATCH] Expose tracked entity map for plugins
+
+
+diff --git a/io/papermc/paper/threadedregions/RegionizedWorldData.java b/io/papermc/paper/threadedregions/RegionizedWorldData.java
+index b579875434672b16806af27c3389fc1ef7c81371..2f620ef15a8736e4fb52f57616776f69c2ff990b 100644
+--- a/io/papermc/paper/threadedregions/RegionizedWorldData.java
++++ b/io/papermc/paper/threadedregions/RegionizedWorldData.java
+@@ -348,6 +348,22 @@ public final class RegionizedWorldData {
+     private final IteratorSafeOrderedReferenceSet<Entity> entityTickList = new IteratorSafeOrderedReferenceSet<>();
+     private final IteratorSafeOrderedReferenceSet<Mob> navigatingMobs = new IteratorSafeOrderedReferenceSet<>();
+     public ReferenceList<Entity> trackerEntities = new ReferenceList<>(EMPTY_ENTITY_ARRAY); // Moonrise - entity tracker
++
++    // Foliage start - plugin compatibility: visit the tracked entities of every region of a world (read-only use)
++    public static void forEachTrackerEntity(final ServerLevel world, final java.util.function.Consumer<Entity> consumer) {
++        world.regioniser.computeForAllRegionsUnsynchronised(region -> {
++            final RegionizedWorldData data = region.getData().getRegionizedData(world.worldRegionData);
++            if (data == null) {
++                return;
++            }
++            final java.util.List<Entity> entities = new java.util.ArrayList<>();
++            for (final Entity entity : data.trackerEntities) {
++                entities.add(entity);
++            }
++            entities.forEach(consumer);
++        });
++    }
++    // Foliage end - plugin compatibility
+     public boolean iteratingTrackerEntities;
+ 
+     // block ticking
+diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
+index f5601ee683c9daef74ab34c96b70d990ac6cf534..7eeaf7628071d0754e33c921ee17d1cecf43a442 100644
+--- a/net/minecraft/server/level/ChunkMap.java
++++ b/net/minecraft/server/level/ChunkMap.java
+@@ -139,6 +139,51 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+     private final ChunkMap.DistanceManager distanceManager;
+     //private final PlayerMap playerMap = new PlayerMap(); // Folia - region threading
+     //public final Int2ObjectMap<ChunkMap.TrackedEntity> entityMap = new Int2ObjectOpenHashMap<>(); // Folia - region threading
++    // Foliage start - plugin compatibility: Folia keeps tracked entities per region; plugins that read this map by
++    // reflection (e.g. PMonitor) get a read-only view over all regions of this world
++    public final Int2ObjectMap<ChunkMap.TrackedEntity> entityMap = new TrackedEntityView(this);
++
++    private static final class TrackedEntityView extends it.unimi.dsi.fastutil.ints.AbstractInt2ObjectMap<ChunkMap.TrackedEntity> {
++
++        private final ChunkMap chunkMap;
++
++        TrackedEntityView(final ChunkMap chunkMap) {
++            this.chunkMap = chunkMap;
++        }
++
++        private Int2ObjectOpenHashMap<ChunkMap.TrackedEntity> snapshot() {
++            final Int2ObjectOpenHashMap<ChunkMap.TrackedEntity> ret = new Int2ObjectOpenHashMap<>();
++            io.papermc.paper.threadedregions.RegionizedWorldData.forEachTrackerEntity(this.chunkMap.level, entity -> {
++                final ChunkMap.TrackedEntity tracked = entity.moonrise$getTrackedEntity();
++                if (tracked != null) {
++                    ret.put(entity.getId(), tracked);
++                }
++            });
++            return ret;
++        }
++
++        @Override
++        public ChunkMap.TrackedEntity get(final int key) {
++            final net.minecraft.world.entity.Entity entity = this.chunkMap.level.moonrise$getEntityLookup().get(key);
++            return entity == null ? null : entity.moonrise$getTrackedEntity();
++        }
++
++        @Override
++        public boolean containsKey(final int key) {
++            return this.get(key) != null;
++        }
++
++        @Override
++        public int size() {
++            return this.snapshot().size();
++        }
++
++        @Override
++        public it.unimi.dsi.fastutil.objects.ObjectSet<Int2ObjectMap.Entry<ChunkMap.TrackedEntity>> int2ObjectEntrySet() {
++            return it.unimi.dsi.fastutil.objects.ObjectSets.unmodifiable(this.snapshot().int2ObjectEntrySet());
++        }
++    }
++    // Foliage end - plugin compatibility
+     private final Long2ByteMap chunkTypeCache = new Long2ByteOpenHashMap();
+     // Paper - rewrite chunk system
+     public int serverViewDistance;

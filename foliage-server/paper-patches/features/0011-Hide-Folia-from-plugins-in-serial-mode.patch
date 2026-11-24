@@ -1,0 +1,153 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clre20 <167730039+clre20@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 19:26:12 +0800
+Subject: [PATCH] Hide Folia from plugins in serial mode
+
+
+diff --git a/src/main/java/io/github/clre20/foliage/compat/FoliaHider.java b/src/main/java/io/github/clre20/foliage/compat/FoliaHider.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..8422bb6e70fb52a21dd4550fe1f6770d9a39bd00
+--- /dev/null
++++ b/src/main/java/io/github/clre20/foliage/compat/FoliaHider.java
+@@ -0,0 +1,69 @@
++package io.github.clre20.foliage.compat;
++
++import java.util.Locale;
++import java.util.Set;
++import java.util.stream.Collectors;
++import java.util.stream.Stream;
++
++/**
++ * Serial mode: makes plugins see a Paper server instead of Folia.
++ * <p>
++ * Plugins usually detect Folia by looking up a Folia-only class such as
++ * {@code io.papermc.paper.threadedregions.RegionizedServer}. The region bridge transformer rewrites those lookups in
++ * plugin code to the methods below, which report Folia-only classes as missing. The plugin then takes its Paper code
++ * path, which the serial mode compatibility layer supports, instead of switching features off.
++ * <p>
++ * Plugins listed in {@code -Dfoliage.folia-visible-plugins} (comma separated, default WorldEdit and
++ * FastAsyncWorldEdit) keep seeing Folia, because their Paper path writes to the world through internals that the
++ * region bridges do not cover.
++ */
++public final class FoliaHider {
++
++    public static final String OWNER = "io/github/clre20/foliage/compat/FoliaHider";
++
++    private static final String PREFIX = "io.papermc.paper.threadedregions.";
++    private static final Set<String> FOLIA_VISIBLE = Stream.of(
++            System.getProperty("foliage.folia-visible-plugins", "WorldEdit,FastAsyncWorldEdit").split(","))
++        .map(s -> s.trim().toLowerCase(Locale.ROOT))
++        .filter(s -> !s.isEmpty())
++        .collect(Collectors.toUnmodifiableSet());
++
++    private FoliaHider() {
++    }
++
++    /** Whether lookups in this plugin's code are rewritten. */
++    public static boolean hidesFor(final String pluginName) {
++        return SerialMode.ENABLED && pluginName != null && !FOLIA_VISIBLE.contains(pluginName.toLowerCase(Locale.ROOT));
++    }
++
++    /** Folia-only server classes; the Paper API part of the package (scheduler, RegionizedServerInitEvent) stays visible. */
++    static boolean hidden(final String name) {
++        return name != null && name.startsWith(PREFIX)
++            && !name.startsWith(PREFIX + "scheduler.")
++            && !name.equals(PREFIX + "RegionizedServerInitEvent");
++    }
++
++    /** Replaces {@code Class.forName(String)}; the caller's class supplies the class loader, like the original. */
++    public static Class<?> forName(final String name, final Class<?> caller) throws ClassNotFoundException {
++        if (hidden(name)) {
++            throw new ClassNotFoundException(name);
++        }
++        return Class.forName(name, true, caller.getClassLoader());
++    }
++
++    /** Replaces {@code Class.forName(String, boolean, ClassLoader)}. */
++    public static Class<?> forName(final String name, final boolean initialize, final ClassLoader loader) throws ClassNotFoundException {
++        if (hidden(name)) {
++            throw new ClassNotFoundException(name);
++        }
++        return Class.forName(name, initialize, loader);
++    }
++
++    /** Replaces {@code ClassLoader.loadClass(String)}. */
++    public static Class<?> loadClass(final ClassLoader loader, final String name) throws ClassNotFoundException {
++        if (hidden(name)) {
++            throw new ClassNotFoundException(name);
++        }
++        return loader.loadClass(name);
++    }
++}
+diff --git a/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java b/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java
+index 986c31c0e720825714bdb10ad868320b1d06a964..b4e73b39d8ba507c6fa5480f1c7ff1914da8f74c 100644
+--- a/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java
++++ b/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java
+@@ -62,7 +62,7 @@ public final class RegionBridgeTransformer {
+         try {
+             final ClassReader reader = new ClassReader(bytecode);
+             final ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
+-            final BridgeClassVisitor visitor = new BridgeClassVisitor(writer);
++            final BridgeClassVisitor visitor = new BridgeClassVisitor(writer, FoliaHider.hidesFor(pluginName));
+             reader.accept(visitor, 0);
+             return visitor.changed ? writer.toByteArray() : bytecode;
+         } catch (final Throwable thr) {
+@@ -125,10 +125,12 @@ public final class RegionBridgeTransformer {
+         private boolean isInterface;
+         private int version;
+         private boolean skip;
++        private final boolean hideFolia;
+         boolean changed;
+ 
+-        BridgeClassVisitor(final ClassVisitor next) {
++        BridgeClassVisitor(final ClassVisitor next, final boolean hideFolia) {
+             super(Opcodes.ASM9, next);
++            this.hideFolia = hideFolia;
+         }
+ 
+         @Override
+@@ -150,6 +152,10 @@ public final class RegionBridgeTransformer {
+             return new MethodVisitor(Opcodes.ASM9, mv) {
+                 @Override
+                 public void visitMethodInsn(final int opcode, final String owner, final String mName, final String mDesc, final boolean itf) {
++                    if (BridgeClassVisitor.this.hideFolia && this.rewriteClassLookup(opcode, owner, mName, mDesc)) {
++                        BridgeClassVisitor.this.changed = true;
++                        return;
++                    }
+                     if (opcode == Opcodes.INVOKEINTERFACE || opcode == Opcodes.INVOKEVIRTUAL) {
+                         final Kind kind = classify(owner, mName, mDesc);
+                         if (kind != null) {
+@@ -164,6 +170,33 @@ public final class RegionBridgeTransformer {
+                     }
+                     super.visitMethodInsn(opcode, owner, mName, mDesc, itf);
+                 }
++
++                // Folia detection: Class.forName / ClassLoader.loadClass -> FoliaHider
++                private boolean rewriteClassLookup(final int opcode, final String owner, final String mName, final String mDesc) {
++                    if (opcode == Opcodes.INVOKESTATIC && owner.equals("java/lang/Class") && mName.equals("forName")) {
++                        if (mDesc.equals("(Ljava/lang/String;)Ljava/lang/Class;")) {
++                            if (BridgeClassVisitor.this.version < Opcodes.V1_5) {
++                                return false; // class literals need Java 5 class files
++                            }
++                            super.visitLdcInsn(org.objectweb.asm.Type.getObjectType(BridgeClassVisitor.this.className));
++                            super.visitMethodInsn(Opcodes.INVOKESTATIC, FoliaHider.OWNER, "forName",
++                                "(Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/Class;", false);
++                            return true;
++                        }
++                        if (mDesc.equals("(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;")) {
++                            super.visitMethodInsn(Opcodes.INVOKESTATIC, FoliaHider.OWNER, "forName", mDesc, false);
++                            return true;
++                        }
++                        return false;
++                    }
++                    if (opcode == Opcodes.INVOKEVIRTUAL && owner.equals("java/lang/ClassLoader") && mName.equals("loadClass")
++                        && mDesc.equals("(Ljava/lang/String;)Ljava/lang/Class;")) {
++                        super.visitMethodInsn(Opcodes.INVOKESTATIC, FoliaHider.OWNER, "loadClass",
++                            "(Ljava/lang/ClassLoader;Ljava/lang/String;)Ljava/lang/Class;", false);
++                        return true;
++                    }
++                    return false;
++                }
+             };
+         }
+ 

@@ -33,12 +33,26 @@ public final class CompatTest extends JavaPlugin implements Listener {
         check("main scoreboard team", () -> Bukkit.getScoreboardManager().getMainScoreboard().registerNewTeam("maint"));
         check("onEnable read block in unloaded chunk", () -> getLogger().info("type=" + Bukkit.getWorlds().get(0).getBlockAt(5000, 64, 5000).getType()));
         check("onEnable region scheduler at unloaded chunk", () -> Bukkit.getRegionScheduler().runAtFixedRate(this, new Location(Bukkit.getWorlds().get(0), 8000, 64, 8000), t -> { getLogger().info("regiontask ok"); t.cancel(); }, 1, 20));
+        check("folia classes hidden", () -> { try { Class.forName("io.papermc.paper.threadedregions.RegionizedServer"); throw new IllegalStateException("visible"); } catch (ClassNotFoundException expected) { } });
+        check("paper scheduler api visible", () -> { try { Class.forName("io.papermc.paper.threadedregions.scheduler.RegionScheduler"); } catch (ClassNotFoundException e) { throw new IllegalStateException(e); } });
+        check("own class via forName", () -> { try { Class.forName("t.CompatTest"); } catch (ClassNotFoundException e) { throw new IllegalStateException(e); } });
         check("createWorld on enable", () -> { World nw = new org.bukkit.WorldCreator("compat_world").createWorld(); if (nw == null) throw new IllegalStateException("null world"); });
         World w = Bukkit.getWorlds().get(0);
         new BukkitRunnable() {
             int tick = 0;
             @Override public void run() {
                 tick++;
+                if (tick == 3) {
+                    check("ChunkMap.entityMap reflection", () -> {
+                        try {
+                            Object level = w.getClass().getMethod("getHandle").invoke(w);
+                            Object cs = level.getClass().getMethod("getChunkSource").invoke(level);
+                            Object cm = cs.getClass().getField("chunkMap").get(cs);
+                            java.util.Map<?, ?> m = (java.util.Map<?, ?>) cm.getClass().getField("entityMap").get(cm);
+                            getLogger().info("entityMap size=" + m.size() + " get(a)=" + (a == null ? "n/a" : (m.get(a.getEntityId()) != null)));
+                        } catch (ReflectiveOperationException e) { throw new IllegalStateException(e); }
+                    });
+                }
                 if (tick == 2) {
                     check("global getCurrentTick", () -> getLogger().info("currentTick=" + Bukkit.getCurrentTick()));
                     check("global read unloaded far block", () -> getLogger().info("far=" + w.getBlockAt(-3000, 64, 3000).getType()));
