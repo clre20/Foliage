@@ -1,7 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: clre20 <167730039+clre20@users.noreply.github.com>
 Date: Tue, 24 Nov 2026 19:26:12 +0800
-Subject: [PATCH] Expose tracked entity map for plugins
+Subject: [PATCH] Expose tracked entity map for plugins and size tick threads
+ by available CPUs
 
 
 diff --git a/io/papermc/paper/threadedregions/RegionizedWorldData.java b/io/papermc/paper/threadedregions/RegionizedWorldData.java
@@ -31,6 +32,27 @@ index b579875434672b16806af27c3389fc1ef7c81371..2f620ef15a8736e4fb52f57616776f69
      public boolean iteratingTrackerEntities;
  
      // block ticking
+diff --git a/io/papermc/paper/threadedregions/TickRegions.java b/io/papermc/paper/threadedregions/TickRegions.java
+index a60e4bf4e64a7423cd02e369d03d6898446daa03..ac80b6c1e33c65a2fb6a158bb07dfb6b48798827 100644
+--- a/io/papermc/paper/threadedregions/TickRegions.java
++++ b/io/papermc/paper/threadedregions/TickRegions.java
+@@ -49,12 +49,10 @@ public final class TickRegions implements ThreadedRegionizer.RegionCallbacks<Tic
+         // Foliage end - serial mode
+         int tickThreads;
+         if (config.threads <= 0) {
+-            tickThreads = OSNuma.getNativeInstance().getTotalCores() / 2;
+-            if (tickThreads <= 4) {
+-                tickThreads = 1;
+-            } else {
+-                tickThreads =  tickThreads / 4;
+-            }
++            // Foliage start - follow the CPUs this JVM may use (container CPU quota, -XX:ActiveProcessorCount), not the
++            // host's physical cores; half of them tick regions, the rest stay for GC, networking and chunk workers
++            tickThreads = Math.max(1, Runtime.getRuntime().availableProcessors() / 2);
++            // Foliage end
+         } else {
+             tickThreads = config.threads;
+         }
 diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
 index f5601ee683c9daef74ab34c96b70d990ac6cf534..7eeaf7628071d0754e33c921ee17d1cecf43a442 100644
 --- a/net/minecraft/server/level/ChunkMap.java
