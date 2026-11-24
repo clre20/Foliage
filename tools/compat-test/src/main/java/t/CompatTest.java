@@ -31,12 +31,19 @@ public final class CompatTest extends JavaPlugin implements Listener {
         getServer().getPluginManager().registerEvents(this, this);
         check("scoreboard new + team + objective", () -> { var sb = Bukkit.getScoreboardManager().getNewScoreboard(); sb.registerNewTeam("t1"); sb.registerNewObjective("o1", org.bukkit.scoreboard.Criteria.DUMMY, net.kyori.adventure.text.Component.text("o")); });
         check("main scoreboard team", () -> Bukkit.getScoreboardManager().getMainScoreboard().registerNewTeam("maint"));
+        check("onEnable read block in unloaded chunk", () -> getLogger().info("type=" + Bukkit.getWorlds().get(0).getBlockAt(5000, 64, 5000).getType()));
+        check("onEnable region scheduler at unloaded chunk", () -> Bukkit.getRegionScheduler().runAtFixedRate(this, new Location(Bukkit.getWorlds().get(0), 8000, 64, 8000), t -> { getLogger().info("regiontask ok"); t.cancel(); }, 1, 20));
         check("createWorld on enable", () -> { World nw = new org.bukkit.WorldCreator("compat_world").createWorld(); if (nw == null) throw new IllegalStateException("null world"); });
         World w = Bukkit.getWorlds().get(0);
         new BukkitRunnable() {
             int tick = 0;
             @Override public void run() {
                 tick++;
+                if (tick == 2) {
+                    check("global getCurrentTick", () -> getLogger().info("currentTick=" + Bukkit.getCurrentTick()));
+                    check("global read unloaded far block", () -> getLogger().info("far=" + w.getBlockAt(-3000, 64, 3000).getType()));
+                    check("global far block getBiome", () -> getLogger().info("biome=" + w.getBlockAt(-3000, 64, 3000).getBiome()));
+                }
                 if (tick == 1) {
                     check("forceload chunks", () -> { w.setChunkForceLoaded(0, 0, true); w.setChunkForceLoaded(125, 0, true); });
                 } else if (tick == 60) {
@@ -65,6 +72,18 @@ public final class CompatTest extends JavaPlugin implements Listener {
                 }
             }
         }.runTaskTimer(this, 1L, 1L);
+    }
+
+    @Override
+    public void onDisable() {
+        for (World dw : Bukkit.getWorlds()) {
+            for (Entity e : dw.getEntities()) {
+                if (e instanceof org.bukkit.entity.Mob m) {
+                    check("onDisable mob setAware", () -> m.setAware(true));
+                }
+            }
+        }
+        getLogger().info("DISABLE ok=" + ok + " fail=" + fail);
     }
 
     @EventHandler

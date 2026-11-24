@@ -63,7 +63,7 @@ git config --global user.name "你的名字"
 git config --global user.email "你的信箱"
 ./gradlew applyAllPatches                     # Windows: gradlew.bat applyAllPatches
 ./gradlew :foliage-server:createPaperclipJar
-# 產物：foliage-server/build/libs/foliage-paperclip-26.3.local-SNAPSHOT.jar（本地建置沒有 build 號碼）
+# 產物：foliage-server/build/libs/foliage-paperclip-26.3.build.0-local.jar（本地建置的 build 號碼是 0）
 ```
 第一次建置會下載 Minecraft 與相依套件，約需 10～20 分鐘、4 GB 以上記憶體。
 

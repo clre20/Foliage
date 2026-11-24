@@ -1,0 +1,141 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clre20 <167730039+clre20@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 17:38:15 +0800
+Subject: [PATCH] Serial mode server thread regions and synchronous chunk loads
+
+
+diff --git a/io/papermc/paper/threadedregions/RegionizedServer.java b/io/papermc/paper/threadedregions/RegionizedServer.java
+index 4c9f4327b26b03202cd06e5d7b363175e98f8fe6..1aee56f793e583768c7fce5c4893ae2bd72b277c 100644
+--- a/io/papermc/paper/threadedregions/RegionizedServer.java
++++ b/io/papermc/paper/threadedregions/RegionizedServer.java
+@@ -129,6 +129,11 @@ public final class RegionizedServer {
+             if (TickThread.isShutdownThread()) {
+                 return 0L;
+             }
++            // Foliage start - serial mode: plugins call Bukkit#getCurrentTick from the global region (BukkitScheduler tasks)
++            if (io.github.clre20.foliage.compat.SerialMode.ENABLED && TickThread.isTickThread()) {
++                return INSTANCE.tickCount;
++            }
++            // Foliage end - serial mode
+             throw new IllegalStateException("No currently ticking region");
+         }
+         return region.getData().getCurrentTick();
+@@ -136,7 +141,8 @@ public final class RegionizedServer {
+ 
+     public static boolean isGlobalTickThread() {
+         // Foliage start - serial mode: only one tick thread exists, so global data may be touched from any region
+-        if (io.github.clre20.foliage.compat.SerialMode.ENABLED && ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()) {
++        if (io.github.clre20.foliage.compat.SerialMode.ENABLED && ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()
++            && !ca.spottedleaf.moonrise.common.util.TickThread.isShutdownThread()) { // the shutdown thread keeps Folia's own rules
+             return true;
+         }
+         // Foliage end - serial mode
+diff --git a/io/papermc/paper/threadedregions/TickRegionScheduler.java b/io/papermc/paper/threadedregions/TickRegionScheduler.java
+index 7a6c537cd9a04b5687a492e52f7d57e9934feaca..9e87462a036ea6846deb22fbb1b189792368bdb1 100644
+--- a/io/papermc/paper/threadedregions/TickRegionScheduler.java
++++ b/io/papermc/paper/threadedregions/TickRegionScheduler.java
+@@ -153,11 +153,34 @@ public final class TickRegionScheduler {
+     }
+ 
+     // Foliage start - serial mode: temporarily switch the current region for plugin calls into another region
++    private static ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData> serialServerThreadRegion;
++    private static RegionizedWorldData serialServerThreadWorldData;
++
++    private static boolean isSerialServerThread() {
++        if (!io.github.clre20.foliage.compat.SerialMode.ENABLED) {
++            return false;
++        }
++        final net.minecraft.server.MinecraftServer server = net.minecraft.server.MinecraftServer.getServer();
++        return server != null && Thread.currentThread() == server.getRunningThread();
++    }
++
++    /** Threads that may switch the current region: region tick threads, and the server thread in serial mode. */
++    public static boolean canSwapTickingRegion() {
++        return Thread.currentThread() instanceof TickThreadRunner || isSerialServerThread();
++    }
++
+     public static ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData> swapTickingRegion(
+         final ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData> region
+     ) {
+         if (!(Thread.currentThread() instanceof TickThreadRunner tickThreadRunner)) {
+-            throw new IllegalStateException("Must be tick thread runner");
++            // the server thread (startup, plugin enable) keeps its current region in static fields
++            if (!isSerialServerThread()) {
++                throw new IllegalStateException("Must be tick thread runner or the server thread in serial mode");
++            }
++            final ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData> previous = serialServerThreadRegion;
++            serialServerThreadRegion = region;
++            serialServerThreadWorldData = region == null ? null : region.regioniser.world.worldRegionData.get();
++            return previous;
+         }
+         final ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData> previous = tickThreadRunner.currentTickingRegion;
+         tickThreadRunner.currentTickingRegion = region;
+@@ -194,6 +217,7 @@ public final class TickRegionScheduler {
+     public static ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData> getCurrentRegion() {
+         final Thread currThread = Thread.currentThread();
+         if (!(currThread instanceof TickThreadRunner tickThreadRunner)) {
++            if (isSerialServerThread()) return serialServerThreadRegion; // Foliage - serial mode
+             return RegionShutdownThread.getRegion();
+         }
+         return tickThreadRunner.currentTickingRegion;
+@@ -207,6 +231,7 @@ public final class TickRegionScheduler {
+     public static RegionizedWorldData getCurrentRegionizedWorldData() {
+         final Thread currThread = Thread.currentThread();
+         if (!(currThread instanceof TickThreadRunner tickThreadRunner)) {
++            if (isSerialServerThread()) return serialServerThreadWorldData; // Foliage - serial mode
+             return RegionShutdownThread.getWorldData();
+         }
+         return tickThreadRunner.currentTickingWorldRegionizedData;
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index 4f52b4d4f1d64599435bb0c252764275e640b83e..c23ec7b81377ed8f491a1d6a13c6086014b63dbb 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -102,7 +102,10 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+ 
+     private ChunkAccess syncLoad(final int chunkX, final int chunkZ, final ChunkStatus toStatus) {
+         // Folia start - region threading
+-        if (ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()) {
++        if (ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()
++            // Foliage - serial mode: chunks that belong to no region yet are not ticked by anyone, the single tick thread may load them
++            && !(io.github.clre20.foliage.compat.SerialMode.ENABLED && io.papermc.paper.threadedregions.TickRegionScheduler.canSwapTickingRegion()
++                && this.level.regioniser.getRegionAtUnsynchronised(chunkX, chunkZ) == null)) {
+             ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(this.level, chunkX, chunkZ, "Cannot asynchronously load chunks");
+         }
+         // Folia end - region threading
+@@ -120,6 +123,36 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+             );
+         }
+ 
++        // Foliage start - serial mode: the chunk usually gets a region of its own once its load is scheduled, which nobody
++        // else ticks while we block (and during startup no tick thread exists at all), so run that region's chunk tasks here
++        if (io.github.clre20.foliage.compat.SerialMode.ENABLED && !completable.isDone()
++            && io.papermc.paper.threadedregions.TickRegionScheduler.canSwapTickingRegion()) {
++            ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler.pushChunkWait(this.level, chunkX, chunkZ);
++            try {
++                while (!completable.isDone()) {
++                    final io.papermc.paper.threadedregions.ThreadedRegionizer.ThreadedRegion<io.papermc.paper.threadedregions.TickRegions.TickRegionData, io.papermc.paper.threadedregions.TickRegions.TickRegionSectionData> target =
++                        this.level.regioniser.getRegionAtUnsynchronised(chunkX, chunkZ);
++                    boolean ran;
++                    if (target != null) {
++                        final io.papermc.paper.threadedregions.ThreadedRegionizer.ThreadedRegion<io.papermc.paper.threadedregions.TickRegions.TickRegionData, io.papermc.paper.threadedregions.TickRegions.TickRegionSectionData> previous =
++                            io.papermc.paper.threadedregions.TickRegionScheduler.swapTickingRegion(target);
++                        try {
++                            ran = this.mainThreadProcessor.pollTask();
++                        } finally {
++                            io.papermc.paper.threadedregions.TickRegionScheduler.swapTickingRegion(previous);
++                        }
++                    } else {
++                        ran = this.level.taskQueueRegionData.executeGlobalChunkTask();
++                    }
++                    if (!ran && !completable.isDone()) {
++                        java.util.concurrent.locks.LockSupport.parkNanos(50_000L);
++                    }
++                }
++            } finally {
++                ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler.popChunkWait();
++            }
++        } else
++        // Foliage end - serial mode
+         if (ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(this.level, chunkX, chunkZ)) {
+             ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkTaskScheduler.pushChunkWait(this.level, chunkX, chunkZ);
+             this.mainThreadProcessor.managedBlock(completable::isDone);

@@ -22,5 +22,7 @@ gradle.lifecycle.beforeProject {
     val buildNumber = providers.environmentVariable("BUILD_NUMBER").orNull?.trim()?.takeIf { it.isNotEmpty() }
     // Same format as Paper: plugins (e.g. Essentials) parse Bukkit#getBukkitVersion with it.
     // The release jar is renamed to Foliage-<mc>-<build>.jar by the GitHub workflow.
-    version = if (buildNumber == null) "$mcVersion.local-SNAPSHOT" else "$mcVersion.build.$buildNumber-${channel.lowercase()}"
+    // Local builds use build 0 with the "local" channel instead of Paper's "<mc>.local-SNAPSHOT": some plugins
+    // (e.g. AuraSkills) only understand the ".build." form.
+    version = "$mcVersion.build.${buildNumber ?: "0"}-${if (buildNumber == null) "local" else channel.lowercase()}"
 }

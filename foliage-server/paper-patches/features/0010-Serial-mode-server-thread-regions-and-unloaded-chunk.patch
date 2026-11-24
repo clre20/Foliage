@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clre20 <167730039+clre20@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 17:38:15 +0800
+Subject: [PATCH] Serial mode server thread regions and unloaded chunk access
+
+
+diff --git a/src/main/java/io/github/clre20/foliage/compat/RegionContext.java b/src/main/java/io/github/clre20/foliage/compat/RegionContext.java
+index a21166683373858094e167054276392487d65d5e..77bcb5647e9cb71594de0be943e44ce9887bf66b 100644
+--- a/src/main/java/io/github/clre20/foliage/compat/RegionContext.java
++++ b/src/main/java/io/github/clre20/foliage/compat/RegionContext.java
+@@ -39,10 +39,10 @@ public final class RegionContext {
+             return NONE;
+         }
+         if (block instanceof Block b) {
+-            return enterWorld(b.getWorld(), b.getX() >> 4, b.getZ() >> 4);
++            return enterWorldLoading(b.getWorld(), b.getX() >> 4, b.getZ() >> 4);
+         }
+         if (block instanceof BlockState s && s.isPlaced()) {
+-            return enterWorld(s.getWorld(), s.getX() >> 4, s.getZ() >> 4);
++            return enterWorldLoading(s.getWorld(), s.getX() >> 4, s.getZ() >> 4);
+         }
+         return NONE;
+     }
+@@ -62,7 +62,7 @@ public final class RegionContext {
+     }
+ 
+     public static Object enterInventory(final Object inventory) {
+-        if (!SerialMode.ENABLED || !(inventory instanceof org.bukkit.craftbukkit.inventory.CraftInventory craft) || !TickThread.isTickThread()) {
++        if (!SerialMode.ENABLED || !(inventory instanceof org.bukkit.craftbukkit.inventory.CraftInventory craft) || !TickRegionScheduler.canSwapTickingRegion()) {
+             return NONE;
+         }
+         // use the underlying container directly: Bukkit's getHolder()/getLocation() may already read the world
+@@ -94,7 +94,7 @@ public final class RegionContext {
+         if (!SerialMode.ENABLED) {
+             return NONE;
+         }
+-        return enterWorld(world, blockX >> 4, blockZ >> 4);
++        return enterWorldLoading(world, blockX >> 4, blockZ >> 4);
+     }
+ 
+     public static Object enterWorldChunk(final Object world, final int chunkX, final int chunkZ) {
+@@ -108,15 +108,31 @@ public final class RegionContext {
+         if (!(world instanceof CraftWorld craftWorld)) {
+             return NONE;
+         }
+-        return enter(craftWorld.getHandle(), chunkX, chunkZ);
++        return enter(craftWorld.getHandle(), chunkX, chunkZ, false);
++    }
++
++    /** Like {@link #enterWorld}, but synchronously loads the chunk first when it is not loaded (Paper behaviour for block access). */
++    private static Object enterWorldLoading(final Object world, final int chunkX, final int chunkZ) {
++        if (!(world instanceof CraftWorld craftWorld)) {
++            return NONE;
++        }
++        return enter(craftWorld.getHandle(), chunkX, chunkZ, true);
+     }
+ 
+     private static Object enter(final ServerLevel level, final int chunkX, final int chunkZ) {
+-        if (!TickThread.isTickThread()) {
++        return enter(level, chunkX, chunkZ, false);
++    }
++
++    private static Object enter(final ServerLevel level, final int chunkX, final int chunkZ, final boolean load) {
++        if (!TickRegionScheduler.canSwapTickingRegion()) {
+             return NONE;
+         }
+-        final ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData> target =
++        ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData> target =
+             level.regioniser.getRegionAtUnsynchronised(chunkX, chunkZ);
++        if (target == null && load) {
++            level.getChunkSource().getChunk(chunkX, chunkZ, net.minecraft.world.level.chunk.status.ChunkStatus.FULL, true);
++            target = level.regioniser.getRegionAtUnsynchronised(chunkX, chunkZ);
++        }
+         if (target == null) {
+             return NONE;
+         }
