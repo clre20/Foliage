@@ -66,7 +66,7 @@ jobs:
       - name: Collect jar
         run: |
           mkdir -p dist
-          cp "foliage-server/build/libs/foliage-paperclip-${{ steps.ver.outputs.mc }}-${{ steps.ver.outputs.build }}.jar" "dist/${{ steps.ver.outputs.jar }}"
+          cp foliage-server/build/libs/foliage-paperclip-*.jar "dist/${{ steps.ver.outputs.jar }}"
           ls -l dist
 
       - name: Upload artifact
