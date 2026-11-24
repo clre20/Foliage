@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clre20 <167730039+clre20@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 16:14:19 +0800
+Subject: [PATCH] Plugin NMS compatibility shims
+
+
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 0c3993cabba01bc84333d250b221f55aaf36832a..008c739fbf190ee7d8d5083dab9dc4698ca03d6d 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -207,6 +207,10 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+     private int emptyTime;
+     private final PortalForcer portalForcer;
+     //private final LevelTicks<Block> blockTicks = new LevelTicks<>(this::isPositionTickingWithEntitiesLoaded); // Folia - region threading
++    // Foliage start - plugin NMS compatibility: unused placeholder for plugins that replace it via reflection (block ticks are per region)
++    @SuppressWarnings("unused")
++    private final LevelTicks<Block> blockTicks = new LevelTicks<>(pos -> false);
++    // Foliage end - plugin NMS compatibility
+     //private final LevelTicks<Fluid> fluidTicks = new LevelTicks<>(this::isPositionTickingWithEntitiesLoaded); // Folia - region threading
+     //private final PathTypeCache pathTypesByPosCache = new PathTypeCache(); // Folia - region threading
+     //private final Set<Mob> navigatingMobs = new ObjectOpenHashSet<>(); // Folia - region threading
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index cb569d164a29e4d910d47644a4d1691e6b15eeea..144ebddf134315fd625900ba54579bdcc005586d 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -119,6 +119,10 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+         .build();
+     //public final List<TickingBlockEntity> blockEntityTickers = Lists.newArrayList(); // Folia - region threading
+     public final int neighbourUpdateMax; //protected final CollectingNeighborUpdater neighborUpdater; // Folia - region threading
++    // Foliage start - plugin NMS compatibility: unused placeholder for plugins that replace it via reflection (neighbour updates are per region)
++    @SuppressWarnings("unused")
++    protected final CollectingNeighborUpdater neighborUpdater;
++    // Foliage end - plugin NMS compatibility
+     //private final List<TickingBlockEntity> pendingBlockEntityTickers = Lists.newArrayList(); // Folia - region threading
+     //private boolean tickingBlockEntities; // Folia - region threading
+     protected final Thread thread;
+@@ -887,6 +891,7 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+         this.biomeManager = new BiomeManager(this, biomeZoomSeed);
+         this.isDebug = isDebug;
+         this.neighbourUpdateMax = maxChainedNeighborUpdates; // Folia - region threading
++        this.neighborUpdater = new CollectingNeighborUpdater(this, maxChainedNeighborUpdates); // Foliage - plugin NMS compatibility
+         this.registryAccess = registryAccess;
+         this.palettedContainerFactory = PalettedContainerFactory.create(registryAccess);
+         this.damageSources = new DamageSources(registryAccess);
+diff --git a/net/minecraft/world/ticks/LevelTicks.java b/net/minecraft/world/ticks/LevelTicks.java
+index 52a7da01ce84b93a4444a002effa261d20e1a707..b988a034bcba0cb0f01c2612ee02138bc10746ef 100644
+--- a/net/minecraft/world/ticks/LevelTicks.java
++++ b/net/minecraft/world/ticks/LevelTicks.java
+@@ -100,6 +100,11 @@ public class LevelTicks<T> implements LevelTickAccess<T> {
+     }
+     // Folia end - region threading
+ 
++    // Foliage start - plugin NMS compatibility: some plugins construct LevelTicks with the vanilla signature
++    public LevelTicks(final LongPredicate tickCheck) {
++        this(tickCheck, null, false);
++    }
++    // Foliage end - plugin NMS compatibility
+     public LevelTicks(final LongPredicate tickCheck, final net.minecraft.server.level.ServerLevel world, final boolean isBlock) { this.world = world; this.isBlock = isBlock; // Folia - add world and isBlock
+         this.tickCheck = tickCheck;
+     }
