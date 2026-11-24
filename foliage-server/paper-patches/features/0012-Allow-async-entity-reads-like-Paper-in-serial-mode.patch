@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clre20 <167730039+clre20@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 20:20:38 +0800
+Subject: [PATCH] Allow async entity reads like Paper in serial mode
+
+
+diff --git a/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java b/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
+index 72a3478a98912caae8899df37218dd2a628a6e05..f186b4a26bc43ddc1444b48979ec7e176890e6b4 100644
+--- a/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
++++ b/src/main/java/ca/spottedleaf/moonrise/common/util/TickThread.java
+@@ -90,7 +90,16 @@ public class TickThread extends Thread {
+         }
+     }
+ 
++    private static final String ENTITY_HANDLE_REASON = "Accessing entity state off owning region's thread"; // Foliage - serial mode
++
+     public static void ensureTickThread(final Entity entity, final String reason) {
++        // Foliage start - serial mode: Folia checks every CraftEntity#getHandle; Paper lets async threads read entity
++        // state there (plugins such as ImageFrame do it from BukkitScheduler async tasks), so keep Paper's behaviour
++        if (io.github.clre20.foliage.compat.SerialMode.ENABLED && !isTickThread()
++            && ENTITY_HANDLE_REASON.equals(reason)) {
++            return;
++        }
++        // Foliage end - serial mode
+         if (!isTickThreadFor(entity)) {
+             final String ex = "Thread failed main thread check: " +
+                 reason + ", context=" + getThreadContext() + ", entity=" + EntityUtil.dumpEntity(entity);

@@ -42,6 +42,10 @@ public final class CompatTest extends JavaPlugin implements Listener {
             int tick = 0;
             @Override public void run() {
                 tick++;
+                if (tick == 150 && a != null) {
+                    final Zombie za = a;
+                    Bukkit.getScheduler().runTaskAsynchronously(CompatTest.this, () -> check("async entity read (Paper behaviour)", () -> getLogger().info("async trackedBy=" + za.getTrackedBy().size() + " loc=" + za.getLocation().getBlockX())));
+                }
                 if (tick == 3) {
                     check("ChunkMap.entityMap reflection", () -> {
                         try {
