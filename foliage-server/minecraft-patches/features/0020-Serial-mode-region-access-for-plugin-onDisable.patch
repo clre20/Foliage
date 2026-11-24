@@ -1,0 +1,120 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clre20 <167730039+clre20@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 23:54:45 +0800
+Subject: [PATCH] Serial mode region access for plugin onDisable
+
+
+diff --git a/io/papermc/paper/threadedregions/RegionizedWorldData.java b/io/papermc/paper/threadedregions/RegionizedWorldData.java
+index 2f620ef15a8736e4fb52f57616776f69c2ff990b..70ce24e958962825b66ac2a7633ddefb264053de 100644
+--- a/io/papermc/paper/threadedregions/RegionizedWorldData.java
++++ b/io/papermc/paper/threadedregions/RegionizedWorldData.java
+@@ -350,6 +350,14 @@ public final class RegionizedWorldData {
+     public ReferenceList<Entity> trackerEntities = new ReferenceList<>(EMPTY_ENTITY_ARRAY); // Moonrise - entity tracker
+ 
+     // Foliage start - plugin compatibility: visit the tracked entities of every region of a world (read-only use)
++    // Foliage start - serial mode: world data of the region owning a chunk, for threads outside any region (shutdown)
++    public static RegionizedWorldData foliage$ownerOf(final ServerLevel world, final int chunkX, final int chunkZ) {
++        final ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData> region =
++            world.regioniser.getRegionAtUnsynchronised(chunkX, chunkZ);
++        return region == null ? null : region.getData().getRegionizedData(world.worldRegionData);
++    }
++    // Foliage end - serial mode
++
+     public static void forEachTrackerEntity(final ServerLevel world, final java.util.function.Consumer<Entity> consumer) {
+         world.regioniser.computeForAllRegionsUnsynchronised(region -> {
+             final RegionizedWorldData data = region.getData().getRegionizedData(world.worldRegionData);
+diff --git a/io/papermc/paper/threadedregions/TickRegionScheduler.java b/io/papermc/paper/threadedregions/TickRegionScheduler.java
+index 9e87462a036ea6846deb22fbb1b189792368bdb1..293902f4dc9f9c449cc0b06d2b56f238284fc151 100644
+--- a/io/papermc/paper/threadedregions/TickRegionScheduler.java
++++ b/io/papermc/paper/threadedregions/TickRegionScheduler.java
+@@ -166,13 +166,21 @@ public final class TickRegionScheduler {
+ 
+     /** Threads that may switch the current region: region tick threads, and the server thread in serial mode. */
+     public static boolean canSwapTickingRegion() {
+-        return Thread.currentThread() instanceof TickThreadRunner || isSerialServerThread();
++        return Thread.currentThread() instanceof TickThreadRunner || isSerialServerThread()
++            || (io.github.clre20.foliage.compat.SerialMode.ENABLED && Thread.currentThread() instanceof RegionShutdownThread); // Foliage - serial mode
+     }
+ 
+     public static ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData> swapTickingRegion(
+         final ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData> region
+     ) {
+         if (!(Thread.currentThread() instanceof TickThreadRunner tickThreadRunner)) {
++            // Foliage start - serial mode: plugin onDisable runs on the region shutdown thread, which tracks its region itself
++            if (io.github.clre20.foliage.compat.SerialMode.ENABLED && Thread.currentThread() instanceof RegionShutdownThread shutdownThread) {
++                final ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData> previous = shutdownThread.shuttingDown;
++                shutdownThread.shuttingDown = region;
++                return previous;
++            }
++            // Foliage end - serial mode
+             // the server thread (startup, plugin enable) keeps its current region in static fields
+             if (!isSerialServerThread()) {
+                 throw new IllegalStateException("Must be tick thread runner or the server thread in serial mode");
+diff --git a/io/papermc/paper/threadedregions/TickRegions.java b/io/papermc/paper/threadedregions/TickRegions.java
+index ac80b6c1e33c65a2fb6a158bb07dfb6b48798827..d79dca29b6cd5548379ec682eabf20e070b64e88 100644
+--- a/io/papermc/paper/threadedregions/TickRegions.java
++++ b/io/papermc/paper/threadedregions/TickRegions.java
+@@ -179,7 +179,13 @@ public final class TickRegions implements ThreadedRegionizer.RegionCallbacks<Tic
+         }
+ 
+         static void updateCurrentRegion() {
+-            TickRegionScheduler.getCurrentRegion().getData().getRegionStats().updateFrom(TickRegionScheduler.getCurrentRegionizedWorldData());
++            // Foliage start - serial mode: entity changes from the shutdown thread have no current region; stats only
++            final ThreadedRegionizer.ThreadedRegion<TickRegionData, TickRegionSectionData> foliageRegion = TickRegionScheduler.getCurrentRegion();
++            if (foliageRegion == null) {
++                return;
++            }
++            // Foliage end - serial mode
++            foliageRegion.getData().getRegionStats().updateFrom(TickRegionScheduler.getCurrentRegionizedWorldData());
+         }
+     }
+ 
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 008c739fbf190ee7d8d5083dab9dc4698ca03d6d..9ea01d6fe27faa74faa92770e90c3ea55eca0334 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -3202,6 +3202,17 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         return this.getGameRules().get(GameRules.SPAWNER_BLOCKS_WORK);
+     }
+ 
++    // Foliage start - serial mode: plugins remove entities from onDisable on the region shutdown thread (Shopkeepers);
++    // the regions are halted there, so update the region that owns the entity directly like Paper does
++    private io.papermc.paper.threadedregions.RegionizedWorldData foliage$entityWorldData(final Entity entity) {
++        final io.papermc.paper.threadedregions.RegionizedWorldData current = this.getCurrentWorldData();
++        if (current != null || !io.github.clre20.foliage.compat.SerialMode.ENABLED || !ca.spottedleaf.moonrise.common.util.TickThread.isShutdownThread()) {
++            return current;
++        }
++        return io.papermc.paper.threadedregions.RegionizedWorldData.foliage$ownerOf(this, entity.getBlockX() >> 4, entity.getBlockZ() >> 4);
++    }
++    // Foliage end - serial mode
++
+     private final class EntityCallbacks implements LevelCallback<Entity> {
+         @Override
+         public void onCreated(final Entity entity) {
+@@ -3228,7 +3239,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+ 
+         @Override
+         public void onTickingEnd(final Entity entity) {
+-            ServerLevel.this.getCurrentWorldData().removeEntityTickingEntity(entity); // Folia - region threading
++            ServerLevel.this.foliage$entityWorldData(entity).removeEntityTickingEntity(entity); // Folia - region threading // Foliage - serial mode
+             // Paper start - Reset pearls when they stop being ticked
+             if (ServerLevel.this.paperConfig().fixes.disableUnloadedChunkEnderpearlExploit && ServerLevel.this.paperConfig().misc.legacyEnderPearlBehavior && entity instanceof net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl pearl) {
+                 pearl.setOwner(null);
+@@ -3290,7 +3301,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+         @Override
+         public void onTrackingEnd(final Entity entity) {
+             org.spigotmc.AsyncCatcher.catchOp("entity unregister"); // Spigot
+-            ServerLevel.this.getCurrentWorldData().removeLoadedEntity(entity); // Folia - region threading
++            ServerLevel.this.foliage$entityWorldData(entity).removeLoadedEntity(entity); // Folia - region threading // Foliage - serial mode
+             // Paper start - Rework map holder tracking - remove the player from the maps they are subscribed to
+             if (entity instanceof Player player) {
+                 for (final MapItemSavedData map : new java.util.ArrayList<>(player.subscribedMaps)) {
+@@ -3325,7 +3336,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+                     );
+                 }
+ 
+-                ServerLevel.this.getCurrentWorldData().removeNavigatingMob(mob); // Folia - region threading
++                ServerLevel.this.foliage$entityWorldData(mob).removeNavigatingMob(mob); // Folia - region threading // Foliage - serial mode
+             }
+ 
+             if (entity instanceof EnderDragon dragon) {

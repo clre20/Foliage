@@ -1,0 +1,112 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clre20 <167730039+clre20@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 23:54:45 +0800
+Subject: [PATCH] Serial mode reflective bridge and bundled spark
+
+
+diff --git a/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java b/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java
+index df9df0ec4595478b51fee758eb1f41d7ec7302a2..f478a58393ba5b1ae54f43629806a27da7dc976d 100644
+--- a/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java
++++ b/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java
+@@ -74,7 +74,7 @@ public final class RegionBridgeTransformer {
+         }
+     }
+ 
+-    private enum Kind { ENTITY, BLOCK, CHUNK, INVENTORY, LOCATION, WORLD_XYZ, WORLD_XZ_BLOCK, WORLD_XZ_CHUNK, ARG_ENTITY }
++    private enum Kind { ENTITY, BLOCK, CHUNK, INVENTORY, LOCATION, WORLD_XYZ, WORLD_XZ_BLOCK, WORLD_XZ_CHUNK, ARG_ENTITY, REFLECT }
+ 
+     private static final String[] PLATFORM_PREFIXES = {
+         "java/", "javax/", "jdk/", "sun/", "kotlin/", "scala/", "org/bukkit/", "net/minecraft/", "io/papermc/",
+@@ -82,6 +82,8 @@ public final class RegionBridgeTransformer {
+         "org/apache/", "io/netty/", "ca/spottedleaf/", "io/github/clre20/foliage/"
+     };
+ 
++    private static final String REFLECT_DESC = "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;";
++
+     private static boolean isPlatform(final String owner) {
+         for (final String prefix : PLATFORM_PREFIXES) {
+             if (owner.startsWith(prefix)) {
+@@ -124,6 +126,9 @@ public final class RegionBridgeTransformer {
+             || owner.equals("org/bukkit/inventory/InventoryHolder") || owner.equals("org/bukkit/inventory/BlockInventoryHolder")) {
+             return Kind.ENTITY; // RegionContext#enterEntity resolves equipment holders and block states
+         }
++        if (owner.equals("java/lang/reflect/Method") && name.equals("invoke") && desc.equals(REFLECT_DESC)) {
++            return Kind.REFLECT; // plugins driving NMS objects through reflection from scheduler tasks (CustomLootX)
++        }
+         if (owner.equals("org/bukkit/Chunk") || owner.equals("org/bukkit/craftbukkit/CraftChunk")) {
+             return Kind.CHUNK;
+         }
+@@ -334,6 +339,11 @@ public final class RegionBridgeTransformer {
+                     mv.visitVarInsn(Opcodes.ILOAD, slots[2]);
+                     mv.visitMethodInsn(Opcodes.INVOKESTATIC, CONTEXT, "enterWorldBlock", "(Ljava/lang/Object;II)Ljava/lang/Object;", false);
+                 }
++                case REFLECT -> { // (method, target, args)
++                    mv.visitVarInsn(Opcodes.ALOAD, slots[1]);
++                    mv.visitVarInsn(Opcodes.ALOAD, slots[2]);
++                    mv.visitMethodInsn(Opcodes.INVOKESTATIC, CONTEXT, "enterReflective", "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;", false);
++                }
+                 case ARG_ENTITY -> {
+                     mv.visitVarInsn(Opcodes.ALOAD, slots[bridge.argIndex() + (call.opcode() == Opcodes.INVOKESTATIC ? 0 : 1)]);
+                     mv.visitMethodInsn(Opcodes.INVOKESTATIC, CONTEXT, "enterEntity", "(Ljava/lang/Object;)Ljava/lang/Object;", false);
+diff --git a/src/main/java/io/github/clre20/foliage/compat/RegionContext.java b/src/main/java/io/github/clre20/foliage/compat/RegionContext.java
+index 282cda016c861ec42fd07edb4a7816e8f03ec8a1..3e57cea9f5cd2215596d1c8276f6b1253acff9b8 100644
+--- a/src/main/java/io/github/clre20/foliage/compat/RegionContext.java
++++ b/src/main/java/io/github/clre20/foliage/compat/RegionContext.java
+@@ -89,6 +89,35 @@ public final class RegionContext {
+         return NONE;
+     }
+ 
++    /** Reflective {@code Method#invoke}: enter the region of an NMS entity, block entity or level + block position target. */
++    public static Object enterReflective(final Object target, final Object[] args) {
++        if (!SerialMode.ENABLED || target == null || !TickRegionScheduler.canSwapTickingRegion()) {
++            return NONE;
++        }
++        if (target instanceof net.minecraft.world.entity.Entity handle) {
++            return enterNms(handle);
++        }
++        if (target instanceof net.minecraft.world.level.block.entity.BlockEntity blockEntity) {
++            return blockEntity.getLevel() instanceof ServerLevel level && !blockEntity.isRemoved()
++                ? enter(level, blockEntity.getBlockPos().getX() >> 4, blockEntity.getBlockPos().getZ() >> 4) : NONE;
++        }
++        if (target instanceof ServerLevel level && args != null) {
++            for (final Object arg : args) {
++                if (arg instanceof net.minecraft.core.BlockPos pos) {
++                    return enter(level, pos.getX() >> 4, pos.getZ() >> 4);
++                }
++            }
++            return NONE;
++        }
++        if (target instanceof CraftEntity || target instanceof org.bukkit.inventory.EntityEquipment) {
++            return enterEntity(target);
++        }
++        if (target instanceof Block || target instanceof BlockState) {
++            return enterBlock(target);
++        }
++        return NONE;
++    }
++
+     private static Object enterNms(final net.minecraft.world.entity.Entity handle) {
+         if (handle == null || !(handle.level() instanceof ServerLevel level)) {
+             return NONE;
+diff --git a/src/main/java/io/papermc/paper/SparksFly.java b/src/main/java/io/papermc/paper/SparksFly.java
+index 8f04f8b4ef704fc5f3acc5eafbd6976f137a3791..8e2333e5694898a3393630d0a03d356fc798e360 100644
+--- a/src/main/java/io/papermc/paper/SparksFly.java
++++ b/src/main/java/io/papermc/paper/SparksFly.java
+@@ -116,7 +116,7 @@ public final class SparksFly {
+ 
+     private void enable() {
+         if (!this.enabled) {
+-            if (false) { // Folia - disable in-built spark profiler
++            if (io.github.clre20.foliage.compat.SerialMode.ENABLED && GlobalConfiguration.get().spark.enabled) { // Folia - disable in-built spark profiler // Foliage - serial mode: one tick thread, keep Paper's bundled spark
+                 this.enabled = true;
+                 this.spark.enable();
+             } else {
+@@ -168,7 +168,7 @@ public final class SparksFly {
+     }
+ 
+     public static boolean isPluginPreferred() {
+-        return true; // Folia - disable in-built spark profiler
++        return !io.github.clre20.foliage.compat.SerialMode.ENABLED || Boolean.getBoolean(PREFER_SPARK_PLUGIN_PROPERTY); // Folia - disable in-built spark profiler // Foliage - serial mode
+     }
+ 
+     private static boolean isPluginEnabled(final Server server) {

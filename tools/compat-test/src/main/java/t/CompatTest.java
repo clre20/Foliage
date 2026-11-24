@@ -18,12 +18,12 @@ import org.bukkit.scheduler.BukkitRunnable;
 
 public final class CompatTest extends JavaPlugin implements Listener {
     private final List<UUID> zombies = new ArrayList<>();
-    private Zombie a, b;
+    private Zombie a, b, c;
     private int ok, fail;
 
     private void check(String name, Runnable r) {
         try { r.run(); ok++; getLogger().info("PASS " + name); }
-        catch (Throwable t) { fail++; getLogger().warning("FAIL " + name + ": " + t); }
+        catch (Throwable t) { fail++; getLogger().log(java.util.logging.Level.WARNING, "FAIL " + name + ": " + t, t); }
     }
 
     @Override
@@ -48,6 +48,7 @@ public final class CompatTest extends JavaPlugin implements Listener {
                     check("global: far block toString", () -> getLogger().info("str=" + zb.getLocation().getBlock().toString().length()));
                     final NmsHelper helper = e -> { try { Object h = e.getClass().getMethod("getHandle").invoke(e); h.getClass().getMethod("tick").invoke(h); } catch (ReflectiveOperationException ex) { throw new IllegalStateException(ex.getCause() == null ? ex : ex.getCause()); } };
                     check("global: plugin helper ticks far entity via NMS", () -> helper.touch(zb));
+                    check("global: reflective NMS block entity update (CustomLootX)", () -> { try { w.getBlockAt(2002, 100, 0).setType(Material.TRIAL_SPAWNER); Object level = w.getClass().getMethod("getHandle").invoke(w); Class<?> bp = Class.forName("net.minecraft.core.BlockPos"); Object pos = bp.getConstructor(int.class, int.class, int.class).newInstance(2002, 100, 0); Object be = Class.forName("net.minecraft.world.level.Level").getMethod("getBlockEntity", bp).invoke(level, pos); if (be == null) throw new IllegalStateException("no block entity"); be.getClass().getMethod("markUpdated").invoke(be); } catch (ReflectiveOperationException ex) { throw new IllegalStateException(ex.getCause() == null ? ex : ex.getCause()); } });
                     check("global: InventoryHolder getInventory far chest", () -> { if (!(w.getBlockAt(2001, 100, 0).getState() instanceof org.bukkit.inventory.InventoryHolder h) || h.getInventory().all(Material.DIAMOND).isEmpty()) throw new IllegalStateException("no diamonds"); });
                     check("global: reflective getInventory far chest", () -> { try { Object st = w.getBlockAt(2001, 100, 0).getState(); Object inv = org.bukkit.inventory.InventoryHolder.class.getMethod("getInventory").invoke(st); if ((int) org.bukkit.inventory.Inventory.class.getMethod("getSize").invoke(inv) != 27) throw new IllegalStateException("size"); } catch (ReflectiveOperationException ex) { throw new IllegalStateException(ex.getCause() == null ? ex : ex.getCause()); } });
                     Bukkit.getScheduler().runTaskAsynchronously(CompatTest.this, () -> check("async far block read (Paper behaviour)", () -> { if (w.getBlockAt(2000, 100, 0).getType() != Material.GOLD_BLOCK) throw new IllegalStateException("type=" + w.getBlockAt(2000, 100, 0).getType()); }));
@@ -77,6 +78,7 @@ public final class CompatTest extends JavaPlugin implements Listener {
                 } else if (tick == 60) {
                     check("spawn A", () -> { a = (Zombie) w.spawnEntity(new Location(w, 8, w.getHighestBlockYAt(8, 8) + 1, 8), EntityType.ZOMBIE); a.setAI(false); a.setPersistent(true); });
                     check("spawn B", () -> { b = (Zombie) w.spawnEntity(new Location(w, 2008, w.getHighestBlockYAt(2008, 8) + 1, 8), EntityType.ZOMBIE); b.setAI(false); b.setPersistent(true); });
+                    check("spawn C (kept for onDisable)", () -> { c = (Zombie) w.spawnEntity(new Location(w, 4008, w.getHighestBlockYAt(4008, 8) + 1, 8), EntityType.ZOMBIE); c.setAI(false); c.setPersistent(true); w.getChunkAt(4008 >> 4, 8 >> 4).addPluginChunkTicket(CompatTest.this); });
                     check("name A", () -> a.setCustomName("A"));
                     check("name B", () -> b.setCustomName("B"));
                     check("block far setType", () -> w.getBlockAt(2000, 100, 0).setType(Material.GOLD_BLOCK));
@@ -114,6 +116,9 @@ public final class CompatTest extends JavaPlugin implements Listener {
                     check("onDisable mob setAware", () -> m.setAware(true));
                 }
             }
+        }
+        if (c != null) {
+            check("onDisable remove far entity (Shopkeepers)", () -> { c.remove(); if (!c.isDead()) throw new IllegalStateException("C not removed"); });
         }
         getLogger().info("DISABLE ok=" + ok + " fail=" + fail);
     }
