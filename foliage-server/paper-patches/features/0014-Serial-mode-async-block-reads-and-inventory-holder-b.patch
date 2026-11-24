@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clre20 <167730039+clre20@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 23:11:10 +0800
+Subject: [PATCH] Serial mode async block reads and inventory holder bridge
+
+
+diff --git a/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java b/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java
+index a385ded82785dab4a31076c437825e9774c50d7e..df9df0ec4595478b51fee758eb1f41d7ec7302a2 100644
+--- a/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java
++++ b/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java
+@@ -120,8 +120,9 @@ public final class RegionBridgeTransformer {
+             || owner.startsWith("org/bukkit/craftbukkit/block/")) {
+             return owner.startsWith("org/bukkit/craftbukkit/block/data/") ? null : Kind.BLOCK;
+         }
+-        if (owner.equals("org/bukkit/inventory/EntityEquipment") || owner.equals("org/bukkit/craftbukkit/inventory/CraftEntityEquipment")) {
+-            return Kind.ENTITY; // RegionContext#enterEntity resolves the equipment holder
++        if (owner.equals("org/bukkit/inventory/EntityEquipment") || owner.equals("org/bukkit/craftbukkit/inventory/CraftEntityEquipment")
++            || owner.equals("org/bukkit/inventory/InventoryHolder") || owner.equals("org/bukkit/inventory/BlockInventoryHolder")) {
++            return Kind.ENTITY; // RegionContext#enterEntity resolves equipment holders and block states
+         }
+         if (owner.equals("org/bukkit/Chunk") || owner.equals("org/bukkit/craftbukkit/CraftChunk")) {
+             return Kind.CHUNK;
+diff --git a/src/main/java/io/github/clre20/foliage/compat/RegionContext.java b/src/main/java/io/github/clre20/foliage/compat/RegionContext.java
+index a2da40c3438fe4f47e01f4599451aeadd0452590..282cda016c861ec42fd07edb4a7816e8f03ec8a1 100644
+--- a/src/main/java/io/github/clre20/foliage/compat/RegionContext.java
++++ b/src/main/java/io/github/clre20/foliage/compat/RegionContext.java
+@@ -31,6 +31,9 @@ public final class RegionContext {
+         if (entity instanceof org.bukkit.inventory.EntityEquipment equipment) {
+             entity = equipment.getHolder();
+         }
++        if (entity instanceof Block || entity instanceof BlockState) {
++            return enterBlock(entity); // InventoryHolder calls on chests, barrels, furnaces...
++        }
+         if (!SerialMode.ENABLED || !(entity instanceof CraftEntity craft)) {
+             return NONE;
+         }
+diff --git a/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java b/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java
+index fac5652082464555df3fd108ff4afd03db8af699..95e7d3a760163862b4d617835c0f34051a5ef649 100644
+--- a/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java
++++ b/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java
+@@ -83,6 +83,14 @@ public class CraftBlock implements Block {
+     public net.minecraft.world.level.block.state.BlockState getBlockState() {
+         // Folia start - region threading
+         if (this.level instanceof ServerLevel serverWorld) {
++            // Foliage start - serial mode: Paper lets async tasks (Slimefun tickers and their addons) read loaded blocks
++            if (io.github.clre20.foliage.compat.SerialMode.ENABLED && !ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()) {
++                final net.minecraft.world.level.chunk.LevelChunk foliageChunk = serverWorld.getChunkSource().getChunkNow(this.position.getX() >> 4, this.position.getZ() >> 4);
++                if (foliageChunk != null) {
++                    return serverWorld.isInValidBounds(this.position) ? foliageChunk.getBlockState(this.position) : net.minecraft.world.level.block.Blocks.VOID_AIR.defaultBlockState();
++                }
++            }
++            // Foliage end - serial mode
+             ca.spottedleaf.moonrise.common.util.TickThread.ensureTickThread(serverWorld, this.position, "Cannot read world asynchronously");
+         }
+         // Folia end - region threading

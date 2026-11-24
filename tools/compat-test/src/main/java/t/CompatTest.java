@@ -48,6 +48,9 @@ public final class CompatTest extends JavaPlugin implements Listener {
                     check("global: far block toString", () -> getLogger().info("str=" + zb.getLocation().getBlock().toString().length()));
                     final NmsHelper helper = e -> { try { Object h = e.getClass().getMethod("getHandle").invoke(e); h.getClass().getMethod("tick").invoke(h); } catch (ReflectiveOperationException ex) { throw new IllegalStateException(ex.getCause() == null ? ex : ex.getCause()); } };
                     check("global: plugin helper ticks far entity via NMS", () -> helper.touch(zb));
+                    check("global: InventoryHolder getInventory far chest", () -> { if (!(w.getBlockAt(2001, 100, 0).getState() instanceof org.bukkit.inventory.InventoryHolder h) || h.getInventory().all(Material.DIAMOND).isEmpty()) throw new IllegalStateException("no diamonds"); });
+                    check("global: reflective getInventory far chest", () -> { try { Object st = w.getBlockAt(2001, 100, 0).getState(); Object inv = org.bukkit.inventory.InventoryHolder.class.getMethod("getInventory").invoke(st); if ((int) org.bukkit.inventory.Inventory.class.getMethod("getSize").invoke(inv) != 27) throw new IllegalStateException("size"); } catch (ReflectiveOperationException ex) { throw new IllegalStateException(ex.getCause() == null ? ex : ex.getCause()); } });
+                    Bukkit.getScheduler().runTaskAsynchronously(CompatTest.this, () -> check("async far block read (Paper behaviour)", () -> { if (w.getBlockAt(2000, 100, 0).getType() != Material.GOLD_BLOCK) throw new IllegalStateException("type=" + w.getBlockAt(2000, 100, 0).getType()); }));
                 }
                 if (tick == 150 && a != null) {
                     final Zombie za = a;

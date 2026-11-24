@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clre20 <167730039+clre20@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 23:11:09 +0800
+Subject: [PATCH] Serial mode block reads outside regions
+
+
+diff --git a/net/minecraft/world/level/Level.java b/net/minecraft/world/level/Level.java
+index 144ebddf134315fd625900ba54579bdcc005586d..2ba5e3a61f2bfb240b96f538c0d16956f2ed5dd5 100644
+--- a/net/minecraft/world/level/Level.java
++++ b/net/minecraft/world/level/Level.java
+@@ -827,6 +827,17 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+     public volatile io.papermc.paper.threadedregions.RegionizedServer.WorldLevelData tickData;
+     public final java.util.concurrent.ConcurrentHashMap.KeySetView<net.minecraft.server.level.ChunkHolder, Boolean> needsChangeBroadcasting = java.util.concurrent.ConcurrentHashMap.newKeySet();
+ 
++    // Foliage start - serial mode: block reads outside any region (global tick, plugin scheduler tasks) skip the
++    // per-region capture state instead of failing; with one tick thread this matches Paper, Folia keeps failing
++    public io.papermc.paper.threadedregions.RegionizedWorldData foliage$readWorldData() {
++        final io.papermc.paper.threadedregions.RegionizedWorldData ret = this.getCurrentWorldData();
++        if (ret == null && !io.github.clre20.foliage.compat.SerialMode.ENABLED) {
++            throw new NullPointerException("No current region world data");
++        }
++        return ret;
++    }
++    // Foliage end - serial mode
++
+     public io.papermc.paper.threadedregions.RegionizedWorldData getCurrentWorldData() {
+         final io.papermc.paper.threadedregions.RegionizedWorldData ret = io.papermc.paper.threadedregions.TickRegionScheduler.getCurrentRegionizedWorldData();
+         if (ret == null) {
+@@ -1016,8 +1027,9 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+     @Nullable
+     public final BlockState getBlockStateIfLoaded(BlockPos pos) {
+         // CraftBukkit start - tree generation
+-        if (this.getCurrentWorldData().captureTreeGeneration) { // Folia - region threading
+-            CraftBlockState previous = this.getCurrentWorldData().capturedBlockStates.get(pos); // Folia - region threading
++        final io.papermc.paper.threadedregions.RegionizedWorldData foliageWorldData = this.foliage$readWorldData(); // Foliage - serial mode
++        if (foliageWorldData != null && foliageWorldData.captureTreeGeneration) { // Folia - region threading // Foliage - serial mode
++            CraftBlockState previous = foliageWorldData.capturedBlockStates.get(pos); // Folia - region threading // Foliage - serial mode
+             if (previous != null) {
+                 return previous.getHandle();
+             }
+@@ -1351,8 +1363,9 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+     @Override
+     public BlockState getBlockState(final BlockPos pos) {
+         // CraftBukkit start - tree generation
+-        if (this.getCurrentWorldData().captureTreeGeneration) { // Folia - region threading
+-            CraftBlockState previous = this.getCurrentWorldData().capturedBlockStates.get(pos); // Paper // Folia - region threading
++        final io.papermc.paper.threadedregions.RegionizedWorldData foliageWorldData = this.foliage$readWorldData(); // Foliage - serial mode
++        if (foliageWorldData != null && foliageWorldData.captureTreeGeneration) { // Folia - region threading // Foliage - serial mode
++            CraftBlockState previous = foliageWorldData.capturedBlockStates.get(pos); // Folia - region threading // Foliage - serial mode
+             if (previous != null) {
+                 return previous.getHandle();
+             }
+@@ -1744,7 +1757,8 @@ public abstract class Level implements LevelAccessor, AutoCloseable, ca.spottedl
+         // Folia end - region threading
+         // Paper start - Perf: Optimize capturedTileEntities lookup
+         net.minecraft.world.level.block.entity.BlockEntity blockEntity;
+-        if (!this.getCurrentWorldData().capturedTileEntities.isEmpty() && (blockEntity = this.getCurrentWorldData().capturedTileEntities.get(pos)) != null) { // Folia - region threading
++        final io.papermc.paper.threadedregions.RegionizedWorldData foliageWorldData = this.foliage$readWorldData(); // Foliage - serial mode
++        if (foliageWorldData != null && !foliageWorldData.capturedTileEntities.isEmpty() && (blockEntity = foliageWorldData.capturedTileEntities.get(pos)) != null) { // Folia - region threading // Foliage - serial mode
+             return blockEntity;
+         }
+         // Paper end - Perf: Optimize capturedTileEntities lookup
+diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
+index b5508c0488ba395ad9eb03baeee01922e2ec3364..0ab63f71f8ab3c33c05158c28f249f2842cd5ed5 100644
+--- a/net/minecraft/world/level/chunk/LevelChunk.java
++++ b/net/minecraft/world/level/chunk/LevelChunk.java
+@@ -476,7 +476,8 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+ 
+     public @Nullable BlockEntity getBlockEntity(final BlockPos pos, final LevelChunk.EntityCreationType creationType) {
+         // CraftBukkit start
+-        BlockEntity blockEntity = this.level.getCurrentWorldData().capturedTileEntities.get(pos); // Folia - region threading
++        final io.papermc.paper.threadedregions.RegionizedWorldData foliageWorldData = this.level.foliage$readWorldData(); // Foliage - serial mode
++        BlockEntity blockEntity = foliageWorldData == null ? null : foliageWorldData.capturedTileEntities.get(pos); // Folia - region threading // Foliage - serial mode
+         if (blockEntity == null) {
+             blockEntity = this.blockEntities.get(pos);
+         }
