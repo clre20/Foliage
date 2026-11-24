@@ -42,6 +42,13 @@ public final class CompatTest extends JavaPlugin implements Listener {
             int tick = 0;
             @Override public void run() {
                 tick++;
+                if (tick == 150 && b != null) {
+                    final Zombie zb = b;
+                    check("global: far entity equipment setItem", () -> zb.getEquipment().setItemInMainHand(new org.bukkit.inventory.ItemStack(Material.STONE_SWORD)));
+                    check("global: far block toString", () -> getLogger().info("str=" + zb.getLocation().getBlock().toString().length()));
+                    final NmsHelper helper = e -> { try { Object h = e.getClass().getMethod("getHandle").invoke(e); h.getClass().getMethod("tick").invoke(h); } catch (ReflectiveOperationException ex) { throw new IllegalStateException(ex.getCause() == null ? ex : ex.getCause()); } };
+                    check("global: plugin helper ticks far entity via NMS", () -> helper.touch(zb));
+                }
                 if (tick == 150 && a != null) {
                     final Zombie za = a;
                     Bukkit.getScheduler().runTaskAsynchronously(CompatTest.this, () -> check("async entity read (Paper behaviour)", () -> getLogger().info("async trackedBy=" + za.getTrackedBy().size() + " loc=" + za.getLocation().getBlockX())));
@@ -90,6 +97,10 @@ public final class CompatTest extends JavaPlugin implements Listener {
                 }
             }
         }.runTaskTimer(this, 1L, 1L);
+    }
+
+    interface NmsHelper {
+        void touch(Entity entity);
     }
 
     @Override

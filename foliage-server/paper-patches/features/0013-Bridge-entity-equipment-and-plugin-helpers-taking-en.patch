@@ -1,0 +1,146 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clre20 <167730039+clre20@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 21:25:22 +0800
+Subject: [PATCH] Bridge entity equipment and plugin helpers taking entities in
+ serial mode
+
+
+diff --git a/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java b/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java
+index b4e73b39d8ba507c6fa5480f1c7ff1914da8f74c..a385ded82785dab4a31076c437825e9774c50d7e 100644
+--- a/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java
++++ b/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java
+@@ -74,7 +74,33 @@ public final class RegionBridgeTransformer {
+         }
+     }
+ 
+-    private enum Kind { ENTITY, BLOCK, CHUNK, INVENTORY, LOCATION, WORLD_XYZ, WORLD_XZ_BLOCK, WORLD_XZ_CHUNK }
++    private enum Kind { ENTITY, BLOCK, CHUNK, INVENTORY, LOCATION, WORLD_XYZ, WORLD_XZ_BLOCK, WORLD_XZ_CHUNK, ARG_ENTITY }
++
++    private static final String[] PLATFORM_PREFIXES = {
++        "java/", "javax/", "jdk/", "sun/", "kotlin/", "scala/", "org/bukkit/", "net/minecraft/", "io/papermc/",
++        "com/destroystokyo/", "net/md_5/", "net/kyori/", "com/google/", "com/mojang/", "it/unimi/", "org/slf4j/",
++        "org/apache/", "io/netty/", "ca/spottedleaf/", "io/github/clre20/foliage/"
++    };
++
++    private static boolean isPlatform(final String owner) {
++        for (final String prefix : PLATFORM_PREFIXES) {
++            if (owner.startsWith(prefix)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    /** Index of the first parameter typed as a Bukkit entity, or -1. */
++    static int entityArgIndex(final String desc) {
++        final Type[] args = Type.getArgumentTypes(desc);
++        for (int i = 0; i < args.length; i++) {
++            if (args[i].getSort() == Type.OBJECT && args[i].getInternalName().startsWith("org/bukkit/entity/")) {
++                return i;
++            }
++        }
++        return -1;
++    }
+ 
+     private record Call(int opcode, String owner, String name, String desc, boolean itf) {
+     }
+@@ -94,6 +120,9 @@ public final class RegionBridgeTransformer {
+             || owner.startsWith("org/bukkit/craftbukkit/block/")) {
+             return owner.startsWith("org/bukkit/craftbukkit/block/data/") ? null : Kind.BLOCK;
+         }
++        if (owner.equals("org/bukkit/inventory/EntityEquipment") || owner.equals("org/bukkit/craftbukkit/inventory/CraftEntityEquipment")) {
++            return Kind.ENTITY; // RegionContext#enterEntity resolves the equipment holder
++        }
+         if (owner.equals("org/bukkit/Chunk") || owner.equals("org/bukkit/craftbukkit/CraftChunk")) {
+             return Kind.CHUNK;
+         }
+@@ -168,6 +197,21 @@ public final class RegionBridgeTransformer {
+                             }
+                         }
+                     }
++                    // Plugin code handing a Bukkit entity to its own (often NMS-based) helpers, e.g. Shopkeepers'
++                    // compat provider ticking an entity's AI from a scheduler task: run the helper in the entity's region.
++                    // Only interface, static and own-class virtual calls, so the bridge never needs protected access.
++                    if ((opcode == Opcodes.INVOKEINTERFACE || opcode == Opcodes.INVOKESTATIC
++                        || (opcode == Opcodes.INVOKEVIRTUAL && owner.equals(BridgeClassVisitor.this.className)))
++                        && !mName.startsWith("foliage$") && !isPlatform(owner)) {
++                        final int argIndex = entityArgIndex(mDesc);
++                        if (argIndex >= 0) {
++                            final Bridge bridge = BridgeClassVisitor.this.argBridgeFor(new Call(opcode, owner, mName, mDesc, itf), argIndex);
++                            super.visitMethodInsn(Opcodes.INVOKESTATIC, BridgeClassVisitor.this.className, bridge.name(),
++                                bridgeDesc(bridge.call()), BridgeClassVisitor.this.isInterface);
++                            BridgeClassVisitor.this.changed = true;
++                            return;
++                        }
++                    }
+                     super.visitMethodInsn(opcode, owner, mName, mDesc, itf);
+                 }
+ 
+@@ -200,6 +244,10 @@ public final class RegionBridgeTransformer {
+             };
+         }
+ 
++        Bridge argBridgeFor(final Call call, final int argIndex) {
++            return this.bridges.computeIfAbsent(call, c -> new Bridge("foliage$bridge$" + this.bridges.size(), c, Kind.ARG_ENTITY, argIndex));
++        }
++
+         Bridge bridgeFor(final Call call, final Kind kind) {
+             final Bridge existing = this.bridges.get(call);
+             if (existing != null) {
+@@ -285,6 +333,10 @@ public final class RegionBridgeTransformer {
+                     mv.visitVarInsn(Opcodes.ILOAD, slots[2]);
+                     mv.visitMethodInsn(Opcodes.INVOKESTATIC, CONTEXT, "enterWorldBlock", "(Ljava/lang/Object;II)Ljava/lang/Object;", false);
+                 }
++                case ARG_ENTITY -> {
++                    mv.visitVarInsn(Opcodes.ALOAD, slots[bridge.argIndex() + (call.opcode() == Opcodes.INVOKESTATIC ? 0 : 1)]);
++                    mv.visitMethodInsn(Opcodes.INVOKESTATIC, CONTEXT, "enterEntity", "(Ljava/lang/Object;)Ljava/lang/Object;", false);
++                }
+                 case WORLD_XZ_CHUNK -> {
+                     mv.visitVarInsn(Opcodes.ALOAD, 0);
+                     mv.visitVarInsn(Opcodes.ILOAD, slots[1]);
+@@ -334,6 +386,9 @@ public final class RegionBridgeTransformer {
+     }
+ 
+     static String bridgeDesc(final Call call) {
++        if (call.opcode() == Opcodes.INVOKESTATIC) {
++            return call.desc();
++        }
+         return "(L" + call.owner() + ";" + call.desc().substring(1);
+     }
+ 
+diff --git a/src/main/java/io/github/clre20/foliage/compat/RegionContext.java b/src/main/java/io/github/clre20/foliage/compat/RegionContext.java
+index 77bcb5647e9cb71594de0be943e44ce9887bf66b..a2da40c3438fe4f47e01f4599451aeadd0452590 100644
+--- a/src/main/java/io/github/clre20/foliage/compat/RegionContext.java
++++ b/src/main/java/io/github/clre20/foliage/compat/RegionContext.java
+@@ -27,7 +27,10 @@ public final class RegionContext {
+     private RegionContext() {
+     }
+ 
+-    public static Object enterEntity(final Object entity) {
++    public static Object enterEntity(Object entity) {
++        if (entity instanceof org.bukkit.inventory.EntityEquipment equipment) {
++            entity = equipment.getHolder();
++        }
+         if (!SerialMode.ENABLED || !(entity instanceof CraftEntity craft)) {
+             return NONE;
+         }
+diff --git a/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java b/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java
+index 69c0e315c77c0e4b8df048961c39f96958e21f89..fac5652082464555df3fd108ff4afd03db8af699 100644
+--- a/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java
++++ b/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java
+@@ -267,8 +267,15 @@ public class CraftBlock implements Block {
+ 
+     @Override
+     public String toString() {
++        // Foliage start - serial mode: plugins build log strings from blocks of other regions (Multiverse safe spawn search)
++        final Object foliageToken = io.github.clre20.foliage.compat.RegionContext.enterBlock(this);
++        try {
+         net.minecraft.world.level.block.state.BlockState state = this.getBlockState();
+         return "CraftBlock{pos=" + this.position + ", type=" + this.getType() + ", data=" + state + ", fluid=" + state.getFluidState() + '}';
++        } finally {
++            io.github.clre20.foliage.compat.RegionContext.exit(foliageToken);
++        }
++        // Foliage end - serial mode
+     }
+ 
+     public static BlockFace notchToBlockFace(@Nullable Direction direction) {
