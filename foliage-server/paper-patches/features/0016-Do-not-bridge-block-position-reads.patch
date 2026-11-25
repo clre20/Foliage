@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clre20 <167730039+clre20@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 20:55:23 +0800
+Subject: [PATCH] Do not bridge block position reads
+
+
+diff --git a/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java b/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java
+index f478a58393ba5b1ae54f43629806a27da7dc976d..f913a8800055763538cdf583c7fda8333619afe3 100644
+--- a/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java
++++ b/src/main/java/io/github/clre20/foliage/compat/RegionBridgeTransformer.java
+@@ -37,8 +37,14 @@ public final class RegionBridgeTransformer {
+     private static final String LOCATION_DESC = "Lorg/bukkit/Location;";
+ 
+     /** World methods whose (int x, int y, int z) arguments are block coordinates. */
++    /** Block / BlockState methods that only read the position, so they need no region and no chunk load. */
++    private static final Set<String> PURE_BLOCK = Set.of(
++        "getX", "getY", "getZ", "getLocation", "getWorld", "getRelative", "getBlockKey", "getFace", "getBlock",
++        "isPlaced", "equals", "hashCode", "toString"
++    );
++
+     private static final Set<String> WORLD_XYZ_BLOCK = Set.of(
+-        "getBlockAt", "getBlockData", "getType", "setType", "setBlockData", "getBlockState", "getBiome", "setBiome",
++        "getBlockData", "getType", "setType", "setBlockData", "getBlockState", "getBiome", "setBiome",
+         "getComputedBiome", "getLightLevel"
+     );
+     /** World methods whose (int x, int z) arguments are block coordinates. */
+@@ -120,7 +126,10 @@ public final class RegionBridgeTransformer {
+             && !owner.equals("org/bukkit/block/Biome") && !owner.equals("org/bukkit/block/BlockType")
+             && !owner.startsWith("org/bukkit/block/BlockType$"))
+             || owner.startsWith("org/bukkit/craftbukkit/block/")) {
+-            return owner.startsWith("org/bukkit/craftbukkit/block/data/") ? null : Kind.BLOCK;
++            // Coordinate-only methods never touch the world (Paper does not load the chunk for them); bridging them
++            // would sync-load the chunk just to read a position, e.g. Slimefun calling Block#getLocation for every
++            // cargo node at startup.
++            return owner.startsWith("org/bukkit/craftbukkit/block/data/") || PURE_BLOCK.contains(name) ? null : Kind.BLOCK;
+         }
+         if (owner.equals("org/bukkit/inventory/EntityEquipment") || owner.equals("org/bukkit/craftbukkit/inventory/CraftEntityEquipment")
+             || owner.equals("org/bukkit/inventory/InventoryHolder") || owner.equals("org/bukkit/inventory/BlockInventoryHolder")) {
+@@ -137,6 +146,9 @@ public final class RegionBridgeTransformer {
+             return Kind.INVENTORY;
+         }
+         if (owner.equals("org/bukkit/World") || owner.equals("org/bukkit/RegionAccessor") || owner.equals("org/bukkit/craftbukkit/CraftWorld")) {
++            if (name.equals("getBlockAt")) {
++                return null; // only creates a block handle, Paper does not load the chunk
++            }
+             if (desc.contains(LOCATION_DESC)) {
+                 return Kind.LOCATION;
+             }
