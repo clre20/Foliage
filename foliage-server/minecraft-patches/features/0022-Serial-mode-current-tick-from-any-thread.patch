@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clre20 <167730039+clre20@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 20:23:33 +0800
+Subject: [PATCH] Serial mode current tick from any thread
+
+
+diff --git a/io/papermc/paper/threadedregions/RegionizedServer.java b/io/papermc/paper/threadedregions/RegionizedServer.java
+index 1aee56f793e583768c7fce5c4893ae2bd72b277c..4cd929691fbaa439016a2fef3ea2a43b234a3d4a 100644
+--- a/io/papermc/paper/threadedregions/RegionizedServer.java
++++ b/io/papermc/paper/threadedregions/RegionizedServer.java
+@@ -130,7 +130,8 @@ public final class RegionizedServer {
+                 return 0L;
+             }
+             // Foliage start - serial mode: plugins call Bukkit#getCurrentTick from the global region (BukkitScheduler tasks)
+-            if (io.github.clre20.foliage.compat.SerialMode.ENABLED && TickThread.isTickThread()) {
++            // and from their own async threads (MythicMobs aura tracker); Paper answers from any thread
++            if (io.github.clre20.foliage.compat.SerialMode.ENABLED) {
+                 return INSTANCE.tickCount;
+             }
+             // Foliage end - serial mode
+@@ -241,7 +242,7 @@ public final class RegionizedServer {
+     }
+ 
+     private long lastServerStatus;
+-    private long tickCount;
++    private volatile long tickCount; // Foliage - serial mode: read by async plugin threads
+ 
+     private void globalTick(final long tickCount) {
+         ++this.tickCount;
