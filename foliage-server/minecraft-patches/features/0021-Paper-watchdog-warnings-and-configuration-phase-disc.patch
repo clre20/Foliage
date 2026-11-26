@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clre20 <167730039+clre20@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 19:36:39 +0800
+Subject: [PATCH] Paper watchdog warnings and configuration phase disconnects
+
+
+diff --git a/io/papermc/paper/threadedregions/FoliaWatchdogThread.java b/io/papermc/paper/threadedregions/FoliaWatchdogThread.java
+index c8a3d87f3688b226ed3b244f1a5fe3360b973bd8..3bd757d5a39e2163e5d5b27ec1fcb124b7ad26e1 100644
+--- a/io/papermc/paper/threadedregions/FoliaWatchdogThread.java
++++ b/io/papermc/paper/threadedregions/FoliaWatchdogThread.java
+@@ -65,9 +65,16 @@ public final class FoliaWatchdogThread extends Thread {
+ 
+             for (final RunningTick tick : ticks) {
+                 final long elapsed = now - tick.lastPrint;
+-                if (elapsed <= TimeUnit.SECONDS.toNanos(5L)) {
++                // Foliage start - serial mode: Paper's watchdog.early-warning-delay / early-warning-every (10s, then every 5s)
++                long threshold = TimeUnit.SECONDS.toNanos(5L);
++                if (io.github.clre20.foliage.compat.SerialMode.ENABLED) {
++                    final io.papermc.paper.configuration.GlobalConfiguration.Watchdog watchdog = io.papermc.paper.configuration.GlobalConfiguration.get().watchdog;
++                    threshold = TimeUnit.MILLISECONDS.toNanos(Math.max(1000L, tick.lastPrint == tick.start ? watchdog.earlyWarningDelay : watchdog.earlyWarningEvery));
++                }
++                if (elapsed <= threshold) {
+                     continue;
+                 }
++                // Foliage end - serial mode
+                 tick.lastPrint = now;
+ 
+                 final double totalElapsedS = (double)(now - tick.start) / 1.0E9;
+diff --git a/net/minecraft/server/network/ServerConfigurationPacketListenerImpl.java b/net/minecraft/server/network/ServerConfigurationPacketListenerImpl.java
+index 77c4670868a95dc7b13461dfa67af34b0a3c329a..5ebd8a4df92f06e021c970d01ceaabc3e78df76f 100644
+--- a/net/minecraft/server/network/ServerConfigurationPacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerConfigurationPacketListenerImpl.java
+@@ -305,9 +305,16 @@ public class ServerConfigurationPacketListenerImpl extends ServerCommonPacketLis
+         }
+ 
+         this.connection.setReadOnly();
+-        this.server.scheduleOnMain(() -> {
++        // Foliage start - configuration connections are ticked by the global region; MinecraftServer#scheduleOnMain
++        // throws in Folia, which turned a keepalive kick during the resource pack phase into an internal exception
++        if (io.papermc.paper.threadedregions.RegionizedServer.isGlobalTickThread()) {
++            this.disconnect(disconnectionInfo);
++            return;
++        }
++        io.papermc.paper.threadedregions.RegionizedServer.getInstance().addTask(() -> {
+             this.disconnect(disconnectionInfo); // Currently you cannot cancel disconnect during the config stage
+         });
++        // Foliage end
+     }
+ 
+     @Override
