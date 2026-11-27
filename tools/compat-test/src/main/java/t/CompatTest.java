@@ -20,6 +20,14 @@ public final class CompatTest extends JavaPlugin implements Listener {
     private final List<UUID> zombies = new ArrayList<>();
     private Zombie a, b, c;
     private int ok, fail;
+    private volatile boolean inTick;
+    private int tickStarts, startsAt100;
+
+    @EventHandler
+    public void onTickStart(com.destroystokyo.paper.event.server.ServerTickStartEvent e) { inTick = true; tickStarts++; }
+
+    @EventHandler
+    public void onTickEnd(com.destroystokyo.paper.event.server.ServerTickEndEvent e) { inTick = false; }
 
     private void check(String name, Runnable r) {
         try { r.run(); ok++; getLogger().info("PASS " + name); }
@@ -42,6 +50,14 @@ public final class CompatTest extends JavaPlugin implements Listener {
             int tick = 0;
             @Override public void run() {
                 tick++;
+                if (tick == 100) {
+                    startsAt100 = tickStarts;
+                    check("BukkitScheduler task runs inside ServerTickStart/End (Paper)", () -> { if (!inTick) throw new IllegalStateException("outside tick"); });
+                }
+                if (tick == 200) {
+                    final int n = tickStarts - startsAt100;
+                    check("one ServerTickStartEvent per server tick with several regions (Paper)", () -> { if (n < 95 || n > 105) throw new IllegalStateException("starts=" + n); });
+                }
                 if (tick == 150 && b != null) {
                     final Zombie zb = b;
                     check("global: far entity equipment setItem", () -> zb.getEquipment().setItemInMainHand(new org.bukkit.inventory.ItemStack(Material.STONE_SWORD)));

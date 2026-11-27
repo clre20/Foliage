@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: x <x>
+Date: Sat, 28 Nov 2026 02:09:59 +0800
+Subject: [PATCH] Serial mode tick events around the whole server tick
+
+
+diff --git a/io/papermc/paper/threadedregions/RegionizedServer.java b/io/papermc/paper/threadedregions/RegionizedServer.java
+index 4cd929691fbaa439016a2fef3ea2a43b234a3d4a..6906d60e0e9130c54ce412c0f55641f61be923ae 100644
+--- a/io/papermc/paper/threadedregions/RegionizedServer.java
++++ b/io/papermc/paper/threadedregions/RegionizedServer.java
+@@ -140,6 +140,12 @@ public final class RegionizedServer {
+         return region.getData().getCurrentTick();
+     }
+ 
++    // Foliage start - serial mode: tick count of the global region, for the serial tick frame
++    public static long foliage$globalTickCount() {
++        return INSTANCE.tickCount;
++    }
++    // Foliage end - serial mode
++
+     public static boolean isGlobalTickThread() {
+         // Foliage start - serial mode: only one tick thread exists, so global data may be touched from any region
+         if (io.github.clre20.foliage.compat.SerialMode.ENABLED && ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()
+diff --git a/io/papermc/paper/threadedregions/TickRegionScheduler.java b/io/papermc/paper/threadedregions/TickRegionScheduler.java
+index 293902f4dc9f9c449cc0b06d2b56f238284fc151..c8c471246754485800bd9e33503d93057f457595 100644
+--- a/io/papermc/paper/threadedregions/TickRegionScheduler.java
++++ b/io/papermc/paper/threadedregions/TickRegionScheduler.java
+@@ -530,6 +530,11 @@ public final class TickRegionScheduler {
+ 
+             final FoliaWatchdogThread.RunningTick runningTick = new FoliaWatchdogThread.RunningTick(tickStart, this, Thread.currentThread()); // Folia - region threading
+             WATCHDOG_THREAD.addTick(runningTick); // Folia - region threading
++            // Foliage start - serial mode: Paper's tick events wrap the whole server tick
++            if (io.github.clre20.foliage.compat.SerialMode.ENABLED) {
++                io.github.clre20.foliage.compat.SerialTickFrame.beforeTick(this.region == null, RegionizedServer.foliage$globalTickCount());
++            }
++            // Foliage end - serial mode
+             try {
+                 // next start isn't updated until the end of this tick
+                 this.tickRegion(tickCount, tickStart, scheduledEnd);
+@@ -540,6 +545,7 @@ public final class TickRegionScheduler {
+             } finally {
+                 WATCHDOG_THREAD.removeTick(runningTick); // Folia - region threading
+                 final long tickEnd = System.nanoTime();
++                if (io.github.clre20.foliage.compat.SerialMode.ENABLED) io.github.clre20.foliage.compat.SerialTickFrame.afterTick(tickStart, tickEnd); // Foliage - serial mode
+                 final long cpuEnd = MEASURE_CPU_TIME ? THREAD_MX_BEAN.getCurrentThreadCpuTime() : 0L;
+ 
+                 // in order to ensure all regions get their chance at scheduling, we have to ensure that regions
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index 7da46e64c4e68e78c4eb54149a0ac048c59f36df..faad09227c134819db2f7796d2cdafeb533326b3 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -1679,8 +1679,10 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         };
+         // Folia end - region threading
+ 
++        if (!io.github.clre20.foliage.compat.SerialMode.ENABLED) { // Foliage - serial mode: fired around the whole tick by SerialTickFrame
+         this.server.spark.tickStart(); // Paper - spark
+         new com.destroystokyo.paper.event.server.ServerTickStartEvent((int)region.getCurrentTick()).callEvent(); // Paper - Server Tick Events // Folia - region threading
++        } // Foliage - serial mode
+         // Folia start - region threading
+         if (region != null) {
+             foliaProfiler.startTimer(ca.spottedleaf.leafprofiler.LProfilerRegistry.INTERNAL_TICK_TASKS); try { // Folia - profiler
+@@ -1764,9 +1766,11 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         // Paper start - Server Tick Events
+         long endTime = System.nanoTime();
+         long remaining = scheduledEnd - endTime; // Folia - region ticking
++        if (!io.github.clre20.foliage.compat.SerialMode.ENABLED) { // Foliage - serial mode: fired around the whole tick by SerialTickFrame
+         new com.destroystokyo.paper.event.server.ServerTickEndEvent((int)io.papermc.paper.threadedregions.RegionizedServer.getCurrentTick(), ((double)(endTime - startTime) / 1000000D), remaining).callEvent(); // Folia - region ticking
+         // Paper end - Server Tick Events
+         this.server.spark.tickEnd(((double)(endTime - startTime) / 1000000D)); // Paper - spark // Folia - region threading
++        } // Foliage - serial mode
+         // Folia - region threading
+     }
+ 

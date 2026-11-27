@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: x <x>
+Date: Sat, 28 Nov 2026 02:09:59 +0800
+Subject: [PATCH] Serial mode tick frame
+
+
+diff --git a/src/main/java/io/github/clre20/foliage/compat/SerialTickFrame.java b/src/main/java/io/github/clre20/foliage/compat/SerialTickFrame.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..415c6f08833a083b64e26f8fdbde3de9f69ec462
+--- /dev/null
++++ b/src/main/java/io/github/clre20/foliage/compat/SerialTickFrame.java
+@@ -0,0 +1,67 @@
++package io.github.clre20.foliage.compat;
++
++import com.destroystokyo.paper.event.server.ServerTickEndEvent;
++import com.destroystokyo.paper.event.server.ServerTickStartEvent;
++
++/**
++ * Paper's tick events in serial mode.
++ * <p>
++ * Paper fires {@link ServerTickStartEvent} once, runs the whole server tick (scheduler, worlds, connections), then
++ * fires {@link ServerTickEndEvent}. Folia fires them around every region tick and never around the global tick, so a
++ * plugin watching tick length (lag monitors, TPS counters) misses BukkitScheduler tasks and sees several "ticks" per
++ * 50 ms. In serial mode everything runs on one thread, so one frame = the global tick plus the region ticks that
++ * follow it, and the events wrap that frame like Paper does. The frame ends when the next global tick starts; the
++ * reported duration is the busy time only, without the idle wait. Paper's bundled spark is told about the same frame.
++ * <p>
++ * Only the single tick thread touches the fields.
++ */
++public final class SerialTickFrame {
++
++    private static final long TICK_NS = 50_000_000L;
++
++    private static boolean open;
++    private static long busyNs;
++    private static int number;
++
++    private SerialTickFrame() {
++    }
++
++    /** Called on the tick thread before a global or region tick runs. */
++    public static void beforeTick(final boolean global, final long globalTickCount) {
++        if (global) {
++            close();
++            open((int) (globalTickCount + 1L)); // Paper numbers the tick after the increment
++        } else if (!open) {
++            open(number + 1); // regions ticked before the first global tick
++        }
++    }
++
++    /** Called on the tick thread after a global or region tick, with its start and end times. */
++    public static void afterTick(final long startNs, final long endNs) {
++        if (open && endNs > startNs) {
++            busyNs += endNs - startNs;
++        }
++    }
++
++    private static void open(final int tick) {
++        open = true;
++        busyNs = 0L;
++        number = tick;
++        spark().tickStart();
++        new ServerTickStartEvent(tick).callEvent();
++    }
++
++    private static void close() {
++        if (!open) {
++            return;
++        }
++        open = false;
++        final long busy = busyNs;
++        new ServerTickEndEvent(number, busy / 1.0E6, TICK_NS - busy).callEvent();
++        spark().tickEnd(busy / 1.0E6);
++    }
++
++    private static io.papermc.paper.SparksFly spark() {
++        return ((org.bukkit.craftbukkit.CraftServer) org.bukkit.Bukkit.getServer()).spark;
++    }
++}
