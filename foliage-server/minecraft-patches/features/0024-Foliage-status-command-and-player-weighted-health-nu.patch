@@ -1,0 +1,416 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clre20 <167730039+clre20@users.noreply.github.com>
+Date: Sat, 28 Nov 2026 03:06:06 +0800
+Subject: [PATCH] Foliage status command and player weighted health numbers
+
+
+diff --git a/io/papermc/paper/threadedregions/commands/CommandFoliage.java b/io/papermc/paper/threadedregions/commands/CommandFoliage.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..acf770ec7b5f1203130bd0d811d2fde92b831e01
+--- /dev/null
++++ b/io/papermc/paper/threadedregions/commands/CommandFoliage.java
+@@ -0,0 +1,255 @@
++package io.papermc.paper.threadedregions.commands;
++
++import io.github.clre20.foliage.compat.SerialMode;
++import io.github.clre20.foliage.compat.SerialTickFrame;
++import io.papermc.paper.threadedregions.TickRegions;
++import net.kyori.adventure.text.Component;
++import net.kyori.adventure.text.TextComponent;
++import net.kyori.adventure.text.format.NamedTextColor;
++import net.kyori.adventure.text.format.TextColor;
++import net.kyori.adventure.text.format.TextDecoration;
++import org.bukkit.Bukkit;
++import org.bukkit.command.Command;
++import org.bukkit.command.CommandSender;
++import org.bukkit.permissions.Permission;
++import org.bukkit.permissions.PermissionDefault;
++import java.lang.management.ManagementFactory;
++import java.lang.management.ThreadInfo;
++import java.lang.management.ThreadMXBean;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.text.DecimalFormat;
++import java.util.ArrayList;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Locale;
++import java.util.Map;
++
++/**
++ * {@code /foliage}: Foliage's own numbers in game, without reading files.
++ * <ul>
++ *     <li>{@code /foliage} (status): mode, CPUs, threads, server tick time, spacetimes (regions), felt TPS, lagging
++ *     players, worst regions, and the state of the later features (light cone regions, CPU pinning, entity parallelism);</li>
++ *     <li>{@code /foliage threads}: live threads grouped by name.</li>
++ * </ul>
++ * Everything is read on demand from data the server already keeps; nothing extra runs while nobody asks.
++ */
++public final class CommandFoliage extends Command {
++
++    public static final String PERMISSION = "foliage.command.status";
++
++    private static final TextColor HEADER = TextColor.color(79, 164, 240);
++    private static final TextColor PRIMARY = TextColor.color(48, 145, 237);
++    private static final TextColor INFORMATION = TextColor.color(145, 198, 243);
++    private static final TextColor LIST = TextColor.color(33, 97, 188);
++    private static final TextColor MUTED = TextColor.color(150, 150, 150);
++
++    private static final ThreadLocal<DecimalFormat> TWO = ThreadLocal.withInitial(() -> new DecimalFormat("#,##0.00"));
++    private static final ThreadLocal<DecimalFormat> ONE = ThreadLocal.withInitial(() -> new DecimalFormat("#,##0.0"));
++
++    public CommandFoliage() {
++        super("foliage");
++        this.setUsage("/<command> [status|threads]");
++        this.setDescription("Shows Foliage status: threads, spacetimes (regions) and felt TPS.");
++        this.setPermission(PERMISSION);
++        try {
++            if (Bukkit.getPluginManager().getPermission(PERMISSION) == null) {
++                Bukkit.getPluginManager().addPermission(new Permission(PERMISSION, "Use /foliage", PermissionDefault.OP));
++            }
++        } catch (final RuntimeException ignored) {
++            // plugin manager not ready; the node then defaults to false for non-ops via testPermission
++        }
++    }
++
++    private static Component line(final String label, final Component value) {
++        return Component.text()
++            .append(Component.text(" - ", LIST, TextDecoration.BOLD))
++            .append(Component.text(label, PRIMARY))
++            .append(value)
++            .append(Component.newline())
++            .build();
++    }
++
++    private static Component info(final String text) {
++        return Component.text(text, INFORMATION);
++    }
++
++    private static Component tps(final double tps) {
++        return Double.isNaN(tps) ? Component.text("-", MUTED) : Component.text(TWO.get().format(tps), CommandUtil.getColourForTPS(tps));
++    }
++
++    private static String readTrim(final String path) {
++        try {
++            return Files.readString(Path.of(path), StandardCharsets.US_ASCII).trim();
++        } catch (final Exception e) {
++            return null;
++        }
++    }
++
++    /** "4 核（容器額度 4.00 核）" style text; only reads two small kernel files */
++    private static String cpuText() {
++        final int jvm = Runtime.getRuntime().availableProcessors();
++        String quota = null;
++        final String v2 = readTrim("/sys/fs/cgroup/cpu.max");
++        if (v2 != null) {
++            final String[] f = v2.split("\\s+");
++            if (f.length == 2 && !f[0].equals("max")) {
++                try {
++                    quota = ONE.get().format(Double.parseDouble(f[0]) / Double.parseDouble(f[1]));
++                } catch (final NumberFormatException ignored) {
++                }
++            }
++        } else {
++            final String q = readTrim("/sys/fs/cgroup/cpu/cpu.cfs_quota_us");
++            final String p = readTrim("/sys/fs/cgroup/cpu/cpu.cfs_period_us");
++            if (q != null && p != null) {
++                try {
++                    final long qq = Long.parseLong(q);
++                    if (qq > 0) {
++                        quota = ONE.get().format(qq / (double) Long.parseLong(p));
++                    }
++                } catch (final NumberFormatException ignored) {
++                }
++            }
++        }
++        return jvm + " 核" + (quota == null ? "（沒有 CPU 額度限制）" : "（容器額度 " + quota + " 核）");
++    }
++
++    private static boolean status(final CommandSender sender) {
++        final FoliageMetrics.Snapshot snap = FoliageMetrics.compute();
++        final ThreadMXBean mx = ManagementFactory.getThreadMXBean();
++        final int tickThreads = TickRegions.getScheduler().getTotalThreadCount();
++
++        final TextComponent.Builder out = Component.text()
++            .append(Component.text("Foliage 狀態\n", HEADER, TextDecoration.BOLD));
++
++        out.append(line("模式：", info(SerialMode.ENABLED
++            ? "單執行緒相容模式（所有區域依序在 1 條 tick 執行緒上跑，等同 Paper）"
++            : "多執行緒（區域平行）")));
++        out.append(line("可用 CPU：", info(cpuText())));
++        out.append(line("執行緒：", info("tick 執行緒 " + tickThreads + " 條｜整個程序 " + mx.getThreadCount() + " 條（含插件）")));
++
++        if (SerialMode.ENABLED) {
++            final double avg = SerialTickFrame.averageTickMillis();
++            final double max = SerialTickFrame.maxRecentMillis(100);
++            out.append(line("伺服器 tick（近 100 tick）：", Component.text()
++                .append(Component.text("平均 ", INFORMATION))
++                .append(Component.text(TWO.get().format(avg), CommandUtil.getColourForMSPT(avg)))
++                .append(Component.text(" ms｜最久 ", INFORMATION))
++                .append(Component.text(TWO.get().format(max), CommandUtil.getColourForMSPT(max)))
++                .append(Component.text(" ms", INFORMATION))
++                .build()));
++        }
++
++        final StringBuilder worlds = new StringBuilder();
++        for (final Map.Entry<String, Integer> e : snap.regionsPerWorld().entrySet()) {
++            if (worlds.length() > 0) {
++                worlds.append("、");
++            }
++            worlds.append(e.getKey()).append(' ').append(e.getValue());
++        }
++        out.append(line("時空（區域）：", info(snap.regions().size() + " 個"
++            + (worlds.length() > 0 ? "（" + worlds + "）" : "")
++            + "｜玩家 " + snap.players() + " 人｜平均每個時空 " + ONE.get().format(snap.playersPerRegion()) + " 人")));
++        out.append(line("體感 TPS（玩家所在區域依人數平均）：", tps(snap.feltTps())));
++        out.append(line("卡頓玩家（所在區域低於 " + (int) FoliageMetrics.LAG_TPS + " TPS）：",
++            Component.text(snap.laggingPlayers() + " / " + snap.players() + "（" + ONE.get().format(snap.laggingPercent()) + "%）",
++                snap.laggingPlayers() == 0 ? NamedTextColor.GREEN : NamedTextColor.RED)));
++
++        final TextComponent.Builder worst = Component.text();
++        for (int i = 0; i < FoliageMetrics.WORST_RANKS.length; ++i) {
++            if (i > 0) {
++                worst.append(Component.text("｜", INFORMATION));
++            }
++            worst.append(Component.text("第 " + FoliageMetrics.WORST_RANKS[i] + " 差 ", INFORMATION))
++                .append(tps(snap.worstByRank()[i]));
++        }
++        out.append(line("最差區域 TPS（近 15 秒）：", worst.build()));
++
++        out.append(line("光錐區域：", Component.text("尚未啟用（階段 B）", MUTED)));
++        out.append(line("CPU 綁定：", Component.text("尚未啟用（階段 E）", MUTED)));
++        out.append(line("區域內實體平行：", Component.text("尚未啟用（階段 F）", MUTED)));
++        out.append(Component.text("詳細區域：/tps｜執行緒分組：/foliage threads", MUTED));
++
++        sender.sendMessage(out.build());
++        return true;
++    }
++
++    /** "Foliage Region Scheduler Thread #0" → "Foliage Region Scheduler Thread #N" */
++    private static String groupName(final String name) {
++        final StringBuilder b = new StringBuilder(name.length());
++        boolean inDigits = false;
++        for (int i = 0; i < name.length(); ++i) {
++            final char c = name.charAt(i);
++            if (Character.isDigit(c)) {
++                if (!inDigits) {
++                    b.append('N');
++                    inDigits = true;
++                }
++            } else {
++                b.append(c);
++                inDigits = false;
++            }
++        }
++        return b.toString();
++    }
++
++    private static boolean threads(final CommandSender sender) {
++        final ThreadMXBean mx = ManagementFactory.getThreadMXBean();
++        final ThreadInfo[] infos = mx.getThreadInfo(mx.getAllThreadIds(), 0);
++        final Map<String, Integer> groups = new HashMap<>();
++        int total = 0;
++        for (final ThreadInfo info : infos) {
++            if (info == null) {
++                continue;
++            }
++            ++total;
++            groups.merge(groupName(info.getThreadName()), 1, Integer::sum);
++        }
++        final List<Map.Entry<String, Integer>> sorted = new ArrayList<>(groups.entrySet());
++        sorted.sort((a, b) -> b.getValue() != a.getValue().intValue() ? Integer.compare(b.getValue(), a.getValue()) : a.getKey().compareTo(b.getKey()));
++
++        final TextComponent.Builder out = Component.text()
++            .append(Component.text("執行緒分組（共 " + total + " 條，" + groups.size() + " 組，列出前 20 組）\n", HEADER, TextDecoration.BOLD));
++        for (int i = 0, len = Math.min(20, sorted.size()); i < len; ++i) {
++            final Map.Entry<String, Integer> e = sorted.get(i);
++            out.append(Component.text(" - ", LIST, TextDecoration.BOLD))
++                .append(Component.text(e.getValue() + " 條 ", INFORMATION))
++                .append(Component.text(e.getKey(), PRIMARY));
++            if (i + 1 < len) {
++                out.append(Component.newline());
++            }
++        }
++        sender.sendMessage(out.build());
++        return true;
++    }
++
++    @Override
++    public boolean execute(final CommandSender sender, final String commandLabel, final String[] args) {
++        if (!this.testPermission(sender)) {
++            return true;
++        }
++        final String sub = args.length == 0 ? "status" : args[0].toLowerCase(Locale.ROOT);
++        switch (sub) {
++            case "status":
++                return status(sender);
++            case "threads":
++                return threads(sender);
++            default:
++                sender.sendMessage(Component.text("用法：/foliage [status|threads]", NamedTextColor.RED));
++                return true;
++        }
++    }
++
++    @Override
++    public List<String> tabComplete(final CommandSender sender, final String alias, final String[] args) throws IllegalArgumentException {
++        if (!this.testPermissionSilent(sender)) {
++            return new ArrayList<>();
++        }
++        if (args.length <= 1) {
++            return CommandUtil.getSortedList(List.of("status", "threads"), args.length == 0 ? "" : args[0]);
++        }
++        return new ArrayList<>();
++    }
++}
+diff --git a/io/papermc/paper/threadedregions/commands/CommandServerHealth.java b/io/papermc/paper/threadedregions/commands/CommandServerHealth.java
+index e5ceaf5c01a5b95c8d5c516d8142abb909cd75b6..6b77a43026779a8f7b313810512fecb91d22626e 100644
+--- a/io/papermc/paper/threadedregions/commands/CommandServerHealth.java
++++ b/io/papermc/paper/threadedregions/commands/CommandServerHealth.java
+@@ -306,6 +306,10 @@ public final class CommandServerHealth extends Command {
+                 .append(Component.text("Highest Region TPS: ", PRIMARY))
+                 .append(Component.text(TWO_DECIMAL_PLACES.get().format(maxTps) + "\n", CommandUtil.getColourForTPS(maxTps)))
+ 
++                // Foliage start - player weighted numbers
++                .append(foliage$playerWeighted())
++                // Foliage end - player weighted numbers
++
+                 .append(Component.text("Highest ", HEADER, TextDecoration.BOLD))
+                 .append(Component.text(Integer.toString(lowestRegionsCount), INFORMATION, TextDecoration.BOLD))
+                 .append(Component.text(" utilisation regions\n", HEADER, TextDecoration.BOLD))
+@@ -317,6 +321,32 @@ public final class CommandServerHealth extends Command {
+         return true;
+     }
+ 
++    // Foliage start - player weighted numbers (felt TPS, lagging players, worst regions)
++    private static Component foliage$playerWeighted() {
++        final FoliageMetrics.Snapshot snap = FoliageMetrics.compute();
++        final TextComponent.Builder worst = Component.text();
++        for (int i = 0; i < FoliageMetrics.WORST_RANKS.length; ++i) {
++            final double v = snap.worstByRank()[i];
++            worst.append(Component.text((i == 0 ? "" : ", ") + "#" + FoliageMetrics.WORST_RANKS[i] + " ", PRIMARY))
++                .append(Double.isNaN(v) ? Component.text("-", INFORMATION) : Component.text(TWO_DECIMAL_PLACES.get().format(v), CommandUtil.getColourForTPS(v)));
++        }
++        final double felt = snap.feltTps();
++        return Component.text()
++            .append(Component.text(" - ", LIST, TextDecoration.BOLD))
++            .append(Component.text("Felt TPS (player weighted): ", PRIMARY))
++            .append(Double.isNaN(felt) ? Component.text("-\n", INFORMATION) : Component.text(TWO_DECIMAL_PLACES.get().format(felt) + "\n", CommandUtil.getColourForTPS(felt)))
++            .append(Component.text(" - ", LIST, TextDecoration.BOLD))
++            .append(Component.text("Players in regions below " + (int) FoliageMetrics.LAG_TPS + " TPS: ", PRIMARY))
++            .append(Component.text(snap.laggingPlayers() + "/" + snap.players() + " (" + ONE_DECIMAL_PLACES.get().format(snap.laggingPercent()) + "%)\n",
++                snap.laggingPlayers() == 0 ? NamedTextColor.GREEN : NamedTextColor.RED))
++            .append(Component.text(" - ", LIST, TextDecoration.BOLD))
++            .append(Component.text("Worst region TPS: ", PRIMARY))
++            .append(worst.build())
++            .append(Component.text("\n"))
++            .build();
++    }
++    // Foliage end - player weighted numbers
++
+     @Override
+     public boolean execute(final CommandSender sender, final String commandLabel, final String[] args) {
+         final String type;
+diff --git a/io/papermc/paper/threadedregions/commands/FoliageMetrics.java b/io/papermc/paper/threadedregions/commands/FoliageMetrics.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..c3de68fd256bcdc513b8c319348a0ebbac75fd32
+--- /dev/null
++++ b/io/papermc/paper/threadedregions/commands/FoliageMetrics.java
+@@ -0,0 +1,95 @@
++package io.papermc.paper.threadedregions.commands;
++
++import ca.spottedleaf.common.time.TickData;
++import io.papermc.paper.threadedregions.ThreadedRegionizer;
++import io.papermc.paper.threadedregions.TickRegions;
++import it.unimi.dsi.fastutil.doubles.DoubleArrayList;
++import net.minecraft.server.level.ServerLevel;
++import org.bukkit.Bukkit;
++import org.bukkit.World;
++import org.bukkit.craftbukkit.CraftWorld;
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++
++/**
++ * Player-facing health numbers (Foliage).
++ * <p>
++ * Region TPS alone hides who is affected: one laggy region with nobody in it does not matter, one with everybody in it
++ * does. So, like EndRod, every number here is weighted by the players standing in each region:
++ * <ul>
++ *     <li>felt TPS: average of the TPS of the region each player is in;</li>
++ *     <li>lagging players: players whose region is below {@link #LAG_TPS} TPS;</li>
++ *     <li>worst region TPS by rank (1st, 5th, 10th, 20th worst).</li>
++ * </ul>
++ * Only reads region reports that the regionizer already keeps; nothing is measured here.
++ */
++public final class FoliageMetrics {
++
++    public static final double LAG_TPS = 15.0;
++    public static final int[] WORST_RANKS = {1, 5, 10, 20};
++
++    public record RegionEntry(ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData> region,
++                              TickData.TickReportData report, double tps, int players) {
++    }
++
++    public record Snapshot(List<RegionEntry> regions, Map<String, Integer> regionsPerWorld, int players,
++                           double feltTps, int laggingPlayers, double[] worstByRank) {
++
++        public double laggingPercent() {
++            return this.players == 0 ? 0.0 : this.laggingPlayers * 100.0 / this.players;
++        }
++
++        public double playersPerRegion() {
++            return this.regions.isEmpty() ? 0.0 : (double) this.players / this.regions.size();
++        }
++    }
++
++    private FoliageMetrics() {
++    }
++
++    public static Snapshot compute() {
++        final List<RegionEntry> entries = new ArrayList<>();
++        final Map<String, Integer> perWorld = new LinkedHashMap<>();
++        final long now = System.nanoTime();
++
++        for (final World bukkitWorld : Bukkit.getWorlds()) {
++            final ServerLevel world = ((CraftWorld) bukkitWorld).getHandle();
++            final int[] count = {0};
++            world.regioniser.computeForAllRegions(region -> {
++                final TickData.TickReportData report = region.getData().getRegionSchedulingHandle().getTickReport15s(now);
++                final double tps = report == null ? 20.0 : report.tpsData().segmentAll().average();
++                final int players = region.getData().getRegionStats().getPlayerCount();
++                entries.add(new RegionEntry(region, report, tps, players));
++                ++count[0];
++            });
++            if (count[0] > 0) {
++                perWorld.put(bukkitWorld.getName(), count[0]);
++            }
++        }
++
++        int players = 0;
++        int lagging = 0;
++        double weighted = 0.0;
++        final DoubleArrayList tpsList = new DoubleArrayList(entries.size());
++        for (final RegionEntry e : entries) {
++            players += e.players();
++            weighted += e.tps() * e.players();
++            if (e.tps() < LAG_TPS) {
++                lagging += e.players();
++            }
++            tpsList.add(e.tps());
++        }
++        tpsList.sort(null);
++
++        final double[] worst = new double[WORST_RANKS.length];
++        for (int i = 0; i < WORST_RANKS.length; ++i) {
++            final int idx = WORST_RANKS[i] - 1;
++            worst[i] = idx < tpsList.size() ? tpsList.getDouble(idx) : Double.NaN;
++        }
++
++        final double felt = players == 0 ? Double.NaN : weighted / players;
++        return new Snapshot(entries, perWorld, players, felt, lagging, worst);
++    }
++}

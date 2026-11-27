@@ -57,6 +57,7 @@ public final class CompatTest extends JavaPlugin implements Listener {
                 if (tick == 200) {
                     final int n = tickStarts - startsAt100;
                     check("one ServerTickStartEvent per server tick with several regions (Paper)", () -> { if (n < 95 || n > 105) throw new IllegalStateException("starts=" + n); });
+                    check("getAverageTickTime / getTickTimes cover the whole server tick (Paper)", () -> { double avg = Bukkit.getAverageTickTime(); long[] t = Bukkit.getTickTimes(); getLogger().info("avgTick=" + avg + " ticks=" + t.length); if (!(avg > 0 && avg < 1000) || t.length != 100) throw new IllegalStateException("avg=" + avg + " len=" + t.length); });
                 }
                 if (tick == 150 && b != null) {
                     final Zombie zb = b;

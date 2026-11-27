@@ -28,6 +28,9 @@
 | 指令 | 說明 |
 |---|---|
 | `/version` | 顯示 Foliage 版本，並向 GitHub Releases 比對同一個 Minecraft 版本的最新 build（結果快取 10 分鐘） |
+| `/foliage` | 狀態總覽：模式、可用 CPU（含容器額度）、執行緒數、伺服器 tick 時間、時空（區域）數與每個時空平均人數、體感 TPS（玩家所在區域依人數平均）、卡頓玩家比例（所在區域低於 15 TPS）、第 1／5／10／20 差的區域 TPS，以及光錐區域、CPU 綁定、區域內實體平行的狀態。權限 `foliage.command.status`（預設 OP） |
+| `/foliage threads` | 目前所有執行緒依名稱分組統計（前 20 組） |
+| `/tps` | 區域健康報告（Folia 原有），另加體感 TPS、卡頓玩家比例與最差區域 TPS。權限 `bukkit.command.tps` |
 
 開服時也會非同步檢查一次；兩者都可用 `paper-global.yml` 的 `update-checker.enabled` 關閉。
 
