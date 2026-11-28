@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clre20 <167730039+clre20@users.noreply.github.com>
+Date: Sat, 28 Nov 2026 23:34:01 +0800
+Subject: [PATCH] Serial mode block state reads from the global tick
+
+
+diff --git a/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java b/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java
+index 95e7d3a760163862b4d617835c0f34051a5ef649..8edc34bbad5285d4e8d65af4dcd36ce17efb70b0 100644
+--- a/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java
++++ b/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java
+@@ -83,8 +83,9 @@ public class CraftBlock implements Block {
+     public net.minecraft.world.level.block.state.BlockState getBlockState() {
+         // Folia start - region threading
+         if (this.level instanceof ServerLevel serverWorld) {
+-            // Foliage start - serial mode: Paper lets async tasks (Slimefun tickers and their addons) read loaded blocks
+-            if (io.github.clre20.foliage.compat.SerialMode.ENABLED && !ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()) {
++            // Foliage start - serial mode: Paper lets async tasks (Slimefun tickers and their addons) read loaded blocks,
++            // and the single tick thread may read any loaded block while it runs the global tick (no current region)
++            if (io.github.clre20.foliage.compat.SerialMode.ENABLED && !ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(serverWorld, this.position)) {
+                 final net.minecraft.world.level.chunk.LevelChunk foliageChunk = serverWorld.getChunkSource().getChunkNow(this.position.getX() >> 4, this.position.getZ() >> 4);
+                 if (foliageChunk != null) {
+                     return serverWorld.isInValidBounds(this.position) ? foliageChunk.getBlockState(this.position) : net.minecraft.world.level.block.Blocks.VOID_AIR.defaultBlockState();
