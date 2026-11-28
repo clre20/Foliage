@@ -1,0 +1,218 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clre20 <167730039+clre20@users.noreply.github.com>
+Date: Sat, 28 Nov 2026 20:38:13 +0800
+Subject: [PATCH] Traditional Chinese tps command
+
+
+diff --git a/io/papermc/paper/threadedregions/commands/CommandServerHealth.java b/io/papermc/paper/threadedregions/commands/CommandServerHealth.java
+index 6b77a43026779a8f7b313810512fecb91d22626e..df42f411a006893da402fbcee7f479044fe519ce 100644
+--- a/io/papermc/paper/threadedregions/commands/CommandServerHealth.java
++++ b/io/papermc/paper/threadedregions/commands/CommandServerHealth.java
+@@ -50,8 +50,8 @@ public final class CommandServerHealth extends Command {
+ 
+     public CommandServerHealth() {
+         super("tps");
+-        this.setUsage("/<command> [server/region] [lowest regions to display]");
+-        this.setDescription("Reports information about server health.");
++        this.setUsage("/<command> [server/region] [要列出的最忙區域數]");
++        this.setDescription("顯示伺服器與區域的健康狀態");
+         this.setPermission("bukkit.command.tps");
+     }
+ 
+@@ -60,9 +60,9 @@ public final class CommandServerHealth extends Command {
+         return Component.text()
+             .append(Component.text(prefix, PRIMARY, TextDecoration.BOLD))
+             .append(Component.text(ONE_DECIMAL_PLACES.get().format(util * 100.0), CommandUtil.getUtilisationColourRegion(util)))
+-            .append(Component.text("% util at ", PRIMARY))
++            .append(Component.text("% 使用率，", PRIMARY))
+             .append(Component.text(TWO_DECIMAL_PLACES.get().format(mspt), CommandUtil.getColourForMSPT(mspt)))
+-            .append(Component.text(" MSPT at ", PRIMARY))
++            .append(Component.text(" MSPT，", PRIMARY))
+             .append(Component.text(TWO_DECIMAL_PLACES.get().format(tps), CommandUtil.getColourForTPS(tps)))
+             .append(Component.text(" TPS" + (newline ? "\n" : ""), PRIMARY))
+             .build();
+@@ -70,11 +70,11 @@ public final class CommandServerHealth extends Command {
+ 
+     private static Component formatRegionStats(final TickRegions.RegionStats stats, final boolean newline) {
+         return Component.text()
+-            .append(Component.text("Chunks: ", PRIMARY))
++            .append(Component.text("區塊：", PRIMARY))
+             .append(Component.text(NO_DECIMAL_PLACES.get().format((long)stats.getChunkCount()), INFORMATION))
+-            .append(Component.text(" Players: ", PRIMARY))
++            .append(Component.text("　玩家：", PRIMARY))
+             .append(Component.text(NO_DECIMAL_PLACES.get().format((long)stats.getPlayerCount()), INFORMATION))
+-            .append(Component.text(" Entities: ", PRIMARY))
++            .append(Component.text("　實體：", PRIMARY))
+             .append(Component.text(NO_DECIMAL_PLACES.get().format((long)stats.getEntityCount()) + (newline ? "\n" : ""), INFORMATION))
+             .build();
+     }
+@@ -83,7 +83,7 @@ public final class CommandServerHealth extends Command {
+         final ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData> region =
+             TickRegionScheduler.getCurrentRegion();
+         if (region == null) {
+-            sender.sendMessage(Component.text("You are not in a region currently", NamedTextColor.RED));
++            sender.sendMessage(Component.text("你目前不在任何區域中", NamedTextColor.RED));
+             return true;
+         }
+ 
+@@ -109,15 +109,15 @@ public final class CommandServerHealth extends Command {
+         final String location = "[w:'" + world.getWorld().getName() + "'," + centerBlockX + "," + yLoc + "," + centerBlockZ + "]";
+ 
+         final Component line = Component.text()
+-            .append(Component.text("Region around block ", PRIMARY))
++            .append(Component.text("區域中心方塊 ", PRIMARY))
+             .append(Component.text(location, INFORMATION))
+-            .append(Component.text(":\n", PRIMARY))
++            .append(Component.text("：\n", PRIMARY))
+ 
+             .append(
+-                formatRegionInfo("15s: ", util15s, mspt15s, tps15s, true)
++                formatRegionInfo("15 秒：", util15s, mspt15s, tps15s, true)
+             )
+             .append(
+-                formatRegionInfo("1m: ", util1m, mspt1m, tps1m, true)
++                formatRegionInfo("1 分：", util1m, mspt1m, tps1m, true)
+             )
+             .append(
+                 formatRegionStats(region.getData().getRegionStats(), false)
+@@ -138,7 +138,7 @@ public final class CommandServerHealth extends Command {
+             try {
+                 lowestRegionsCount = Integer.parseInt(args[1]);
+             } catch (final NumberFormatException ex) {
+-                sender.sendMessage(Component.text("Highest utilisation count '" + args[1] + "' must be an integer", NamedTextColor.RED));
++                sender.sendMessage(Component.text("區域數「" + args[1] + "」必須是整數", NamedTextColor.RED));
+                 return true;
+             }
+         }
+@@ -215,7 +215,7 @@ public final class CommandServerHealth extends Command {
+         final TextComponent.Builder lowestRegionsBuilder = Component.text();
+ 
+         if (sender instanceof Player) {
+-            lowestRegionsBuilder.append(Component.text(" Click to teleport\n", SECONDARY));
++            lowestRegionsBuilder.append(Component.text(" 點擊可傳送\n", SECONDARY));
+         }
+         for (int i = 0, len = Math.min(lowestRegionsCount, regionsBelowThreshold.size()); i < len; ++i) {
+             final ObjectObjectImmutablePair<ThreadedRegionizer.ThreadedRegion<TickRegions.TickRegionData, TickRegions.TickRegionSectionData>, TickData.TickReportData>
+@@ -246,15 +246,15 @@ public final class CommandServerHealth extends Command {
+             final String location = "[w:'" + world.getWorld().getName() + "'," + centerBlockX + "," + yLoc + "," + centerBlockZ + "]";
+             final Component line = Component.text()
+                 .append(Component.text(" - ", LIST, TextDecoration.BOLD))
+-                .append(Component.text("Region around block ", PRIMARY))
++                .append(Component.text("區域中心方塊 ", PRIMARY))
+                 .append(Component.text(location, INFORMATION))
+-                .append(Component.text(":\n", PRIMARY))
++                .append(Component.text("：\n", PRIMARY))
+ 
+                 .append(Component.text("    ", PRIMARY))
+                 .append(Component.text(ONE_DECIMAL_PLACES.get().format(util * 100.0), CommandUtil.getUtilisationColourRegion(util)))
+-                .append(Component.text("% util at ", PRIMARY))
++                .append(Component.text("% 使用率，", PRIMARY))
+                 .append(Component.text(TWO_DECIMAL_PLACES.get().format(mspt), CommandUtil.getColourForMSPT(mspt)))
+-                .append(Component.text(" MSPT at ", PRIMARY))
++                .append(Component.text(" MSPT，", PRIMARY))
+                 .append(Component.text(TWO_DECIMAL_PLACES.get().format(tps), CommandUtil.getColourForTPS(tps)))
+                 .append(Component.text(" TPS\n", PRIMARY))
+ 
+@@ -263,56 +263,56 @@ public final class CommandServerHealth extends Command {
+                 .build()
+ 
+                 .clickEvent(ClickEvent.clickEvent(ClickEvent.Action.RUN_COMMAND, Payload.string("/minecraft:execute as @s in " + world.getWorld().getKey().toString() + " run minecraft:tp " + centerBlockX + ".5 " + yLoc + " " + centerBlockZ + ".5")))
+-                .hoverEvent(HoverEvent.hoverEvent(HoverEvent.Action.SHOW_TEXT, Component.text("Click to teleport to " + location, SECONDARY)));
++                .hoverEvent(HoverEvent.hoverEvent(HoverEvent.Action.SHOW_TEXT, Component.text("點擊傳送到 " + location, SECONDARY)));
+ 
+             lowestRegionsBuilder.append(line);
+         }
+ 
+         sender.sendMessage(
+             Component.text()
+-                .append(Component.text("Server Health Report\n", HEADER, TextDecoration.BOLD))
++                .append(Component.text("伺服器健康報告\n", HEADER, TextDecoration.BOLD))
+ 
+                 .append(Component.text(" - ", LIST, TextDecoration.BOLD))
+-                .append(Component.text("Online Players: ", PRIMARY))
++                .append(Component.text("線上玩家：", PRIMARY))
+                 .append(Component.text(Bukkit.getOnlinePlayers().size() + "\n", INFORMATION))
+ 
+                 .append(Component.text(" - ", LIST, TextDecoration.BOLD))
+-                .append(Component.text("Total regions: ", PRIMARY))
++                .append(Component.text("區域總數：", PRIMARY))
+                 .append(Component.text(regions.size() + "\n", INFORMATION))
+ 
+                 .append(Component.text(" - ", LIST, TextDecoration.BOLD))
+-                .append(Component.text("Utilisation: ", PRIMARY))
++                .append(Component.text("總使用率：", PRIMARY))
+                 .append(Component.text(ONE_DECIMAL_PLACES.get().format(totalUtil * 100.0), CommandUtil.getUtilisationColourRegion(totalUtil / (double)maxThreadCount)))
+                 .append(Component.text("% / ", PRIMARY))
+                 .append(Component.text(ONE_DECIMAL_PLACES.get().format(maxThreadCount * 100.0), INFORMATION))
+                 .append(Component.text("%\n", PRIMARY))
+ 
+                 .append(Component.text(" - ", LIST, TextDecoration.BOLD))
+-                .append(Component.text("Load rate: ", PRIMARY))
++                .append(Component.text("區塊載入速率：", PRIMARY))
+                 .append(Component.text(TWO_DECIMAL_PLACES.get().format(loadRate) + ", ", INFORMATION))
+-                .append(Component.text("Gen rate: ", PRIMARY))
++                .append(Component.text("生成速率：", PRIMARY))
+                 .append(Component.text(TWO_DECIMAL_PLACES.get().format(genRate) + "\n", INFORMATION))
+ 
+                 .append(Component.text(" - ", LIST, TextDecoration.BOLD))
+-                .append(Component.text("Lowest Region TPS: ", PRIMARY))
++                .append(Component.text("最低區域 TPS：", PRIMARY))
+                 .append(Component.text(TWO_DECIMAL_PLACES.get().format(minTps) + "\n", CommandUtil.getColourForTPS(minTps)))
+ 
+ 
+                 .append(Component.text(" - ", LIST, TextDecoration.BOLD))
+-                .append(Component.text("Median Region TPS: ", PRIMARY))
++                .append(Component.text("中位數區域 TPS：", PRIMARY))
+                 .append(Component.text(TWO_DECIMAL_PLACES.get().format(medianTps) + "\n", CommandUtil.getColourForTPS(medianTps)))
+ 
+                 .append(Component.text(" - ", LIST, TextDecoration.BOLD))
+-                .append(Component.text("Highest Region TPS: ", PRIMARY))
++                .append(Component.text("最高區域 TPS：", PRIMARY))
+                 .append(Component.text(TWO_DECIMAL_PLACES.get().format(maxTps) + "\n", CommandUtil.getColourForTPS(maxTps)))
+ 
+                 // Foliage start - player weighted numbers
+                 .append(foliage$playerWeighted())
+                 // Foliage end - player weighted numbers
+ 
+-                .append(Component.text("Highest ", HEADER, TextDecoration.BOLD))
++                .append(Component.text("使用率最高的 ", HEADER, TextDecoration.BOLD))
+                 .append(Component.text(Integer.toString(lowestRegionsCount), INFORMATION, TextDecoration.BOLD))
+-                .append(Component.text(" utilisation regions\n", HEADER, TextDecoration.BOLD))
++                .append(Component.text(" 個區域\n", HEADER, TextDecoration.BOLD))
+ 
+                 .append(lowestRegionsBuilder.build())
+                 .build()
+@@ -333,14 +333,14 @@ public final class CommandServerHealth extends Command {
+         final double felt = snap.feltTps();
+         return Component.text()
+             .append(Component.text(" - ", LIST, TextDecoration.BOLD))
+-            .append(Component.text("Felt TPS (player weighted): ", PRIMARY))
++            .append(Component.text("玩家體感 TPS（依玩家人數加權）：", PRIMARY))
+             .append(Double.isNaN(felt) ? Component.text("-\n", INFORMATION) : Component.text(TWO_DECIMAL_PLACES.get().format(felt) + "\n", CommandUtil.getColourForTPS(felt)))
+             .append(Component.text(" - ", LIST, TextDecoration.BOLD))
+-            .append(Component.text("Players in regions below " + (int) FoliageMetrics.LAG_TPS + " TPS: ", PRIMARY))
++            .append(Component.text("在 " + (int) FoliageMetrics.LAG_TPS + " TPS 以下區域的玩家：", PRIMARY))
+             .append(Component.text(snap.laggingPlayers() + "/" + snap.players() + " (" + ONE_DECIMAL_PLACES.get().format(snap.laggingPercent()) + "%)\n",
+                 snap.laggingPlayers() == 0 ? NamedTextColor.GREEN : NamedTextColor.RED))
+             .append(Component.text(" - ", LIST, TextDecoration.BOLD))
+-            .append(Component.text("Worst region TPS: ", PRIMARY))
++            .append(Component.text("最差區域 TPS（依排名）：", PRIMARY))
+             .append(worst.build())
+             .append(Component.text("\n"))
+             .build();
+@@ -362,13 +362,13 @@ public final class CommandServerHealth extends Command {
+             }
+             case "region": {
+                 if (!(sender instanceof Entity)) {
+-                    sender.sendMessage(Component.text("Cannot see current region information as console", NamedTextColor.RED));
++                    sender.sendMessage(Component.text("控制台沒有所在區域，請改用 /tps server", NamedTextColor.RED));
+                     return true;
+                 }
+                 return executeRegion(sender, commandLabel, args);
+             }
+             default: {
+-                sender.sendMessage(Component.text("Type '" + args[0] + "' must be one of: [server, region]", NamedTextColor.RED));
++                sender.sendMessage(Component.text("類型「" + args[0] + "」只能是 server 或 region", NamedTextColor.RED));
+                 return true;
+             }
+         }
