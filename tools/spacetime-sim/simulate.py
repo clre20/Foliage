@@ -109,6 +109,8 @@ def iter_samples(paths: list[str], default_sim: int, force_sim: int | None = Non
                 continue
             try:
                 d = json.loads(line)
+                if "type" in d:
+                    continue  # FoliageRecorder 1.1.0 起的伺服器基準、方塊實體行，模擬不用
                 t = int(d["t"])
                 ws = _parse(d, default_sim, force_sim)
             except (KeyError, ValueError, TypeError) as e:
